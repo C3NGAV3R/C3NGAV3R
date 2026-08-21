@@ -1,6 +1,6 @@
 # Primate Panic AI
 
-Local picture-to-Unity reconstruction tool powered by Ollama.
+Local multi-mode Unity AI tool powered by Ollama.
 
 ## Install / update
 
@@ -10,31 +10,48 @@ In Unity open **Window > Package Manager**, click **+**, choose **Add package fr
 
 Open with **Tools > Primate Panic AI**.
 
-## Vision model
+## Local models
 
-Install the recommended local vision model:
+Coding model:
+
+`ollama run qwen2.5-coder:7b`
+
+Faster coding model:
+
+`ollama run qwen2.5-coder:3b`
+
+Vision model:
 
 `ollama run qwen2.5vl:3b`
 
-The plugin talks to:
+Default Ollama endpoint:
 
 `http://127.0.0.1:11434/api/generate`
 
-Qwen2.5-VL accepts image input. No OpenAI API key is required.
+No OpenAI API key is required.
 
-## v0.4.0 Picture -> Unity
+## v0.5.0 modes
 
-The old selected-GameObject inspector has been removed from the main workflow.
+Use the three tabs at the top of the window:
 
-1. Click **Pick Reference Picture**.
-2. Choose a PNG/JPG reference image.
-3. The plugin shows a preview and downsizes the image before sending it locally to reduce lag.
-4. Describe what should be recreated.
-5. Click **RECREATE PICTURE IN UNITY**.
-6. The vision model returns a bounded structured 3D plan and Unity creates the reconstruction directly in the current scene.
+### AGENT
 
-The reconstruction is a 3D blockout made from Unity primitives (Cube, Sphere, Capsule, Cylinder, Plane and Quad), with hierarchy, transforms and approximate colors. It cannot recover the exact original mesh, rig, animation or hidden geometry from one flat screenshot.
+The AI automatically inspects the currently selected GameObject, attached script paths/source, Rigidbody/Collider/Animator basics and recent bounded in-memory Console errors. It returns a structured action plan and immediately applies supported Unity edits.
 
-The vision prompt tells the model to ignore Unity editor UI, scene gizmos, transform handles and rig/bone lines unless requested.
+Supported bounded actions include creating/replacing files under `Assets/`, adding/removing components, enabling/disabling objects, changing local transforms and setting supported component fields/references. Replaced files are backed up under `Library/PrimatePanicAIBackups/`.
 
-Recreations are grouped under one root object and can be undone with Ctrl+Z.
+There is no separate Inspect Selected button; selecting an object and pressing **RUN AGENT** is enough.
+
+### PLAN
+
+Uses the same automatic inspection as Agent Mode, but **does not change the project**. Press **MAKE PLAN** to review the actions first. If you want those exact actions afterward, press **APPLY LAST PLAN**.
+
+### PICTURE -> 3D
+
+Pick a PNG/JPG reference image, describe what should be recreated and press **RECREATE PICTURE IN UNITY**. The vision model returns a bounded 3D blockout plan and Unity creates it from primitives with hierarchy, transforms and approximate colors.
+
+The vision prompt ignores editor UI, scene gizmos, transform handles and rig/bone lines unless requested. A single flat picture cannot recover the exact original hidden mesh, rig or animation.
+
+## Performance
+
+Fast Mode keeps coding prompts smaller. Recent Console errors are captured in memory; the plugin does not read Unity's `Editor.log` file.
