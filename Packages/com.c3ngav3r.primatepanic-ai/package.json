@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "displayName": "Primate Panic AI",
-  "description": "Local multi-mode Unity AI tool powered by Ollama. v0.9 adds automatic invalid-JSON regeneration, strict action schemas, safer asset rules, and real separate-scene creation/saving for menus and loading screens.",
+  "description": "Local Unity AI powered by Ollama. v1.0 adds SMART BRAIN mode with OpenAI gpt-oss reasoning, planner-reviewer-executor flow, strict structured outputs, separate-scene creation, real UI construction, and safer project actions.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
