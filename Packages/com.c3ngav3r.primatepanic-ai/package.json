@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "displayName": "Primate Panic AI",
-  "description": "Local multi-mode Unity AI tool powered by Ollama. Switch between Agent Mode, safe Plan Mode, and Picture-to-3D reconstruction.",
+  "description": "Local multi-mode Unity AI tool powered by Ollama. Agent Mode can now create new GameObjects and standalone systems automatically without requiring a selected object.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
