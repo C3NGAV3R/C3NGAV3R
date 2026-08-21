@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
+using System.Reflection;
 using System.Text;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -9,22 +11,91 @@ using UnityEngine.Networking;
 
 namespace C3NGAV3R.PrimatePanicAI
 {
+    [InitializeOnLoad]
+    internal static class PrimatePanicAIRecentLogs
+    {
+        private static readonly List<string> Entries = new List<string>();
+        private const int MaxEntries = 30;
+
+        static PrimatePanicAIRecentLogs()
+        {
+            Application.logMessageReceived -= OnLog;
+            Application.logMessageReceived += OnLog;
+        }
+
+        private static void OnLog(string condition, string stackTrace, LogType type)
+        {
+            if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert)
+                return;
+
+            string text = type + ": " + condition;
+            if (!string.IsNullOrEmpty(stackTrace))
+            {
+                string[] lines = stackTrace.Split('\n');
+                if (lines.Length > 0 && !string.IsNullOrWhiteSpace(lines[0]))
+                    text += "\n" + lines[0].Trim();
+            }
+
+            if (text.Length > 1400)
+                text = text.Substring(0, 1400) + " ...";
+
+            Entries.Add(text);
+            while (Entries.Count > MaxEntries)
+                Entries.RemoveAt(0);
+        }
+
+        public static string GetRecent(int maxCount)
+        {
+            if (Entries.Count == 0)
+                return "No recent Unity Console errors captured since the last script reload.";
+
+            int start = Mathf.Max(0, Entries.Count - Mathf.Max(1, maxCount));
+            StringBuilder sb = new StringBuilder();
+            for (int i = start; i < Entries.Count; i++)
+            {
+                sb.AppendLine("---");
+                sb.AppendLine(Entries[i]);
+            }
+            return sb.ToString();
+        }
+    }
+
     public class PrimatePanicAIWindow : EditorWindow
     {
-        private const string ModelPref = "PrimatePanicAI.VisionModel";
-        private const string EndpointPref = "PrimatePanicAI.OllamaEndpoint";
-        private const string AutoApplyPref = "PrimatePanicAI.PictureAutoApply";
+        private enum WorkspaceMode
+        {
+            Agent = 0,
+            Plan = 1,
+            PictureTo3D = 2
+        }
 
-        private string model = "qwen2.5vl:3b";
+        private const string ModePref = "PrimatePanicAI.Mode";
+        private const string TextModelPref = "PrimatePanicAI.TextModel";
+        private const string VisionModelPref = "PrimatePanicAI.VisionModel";
+        private const string EndpointPref = "PrimatePanicAI.OllamaEndpoint";
+        private const string FastModePref = "PrimatePanicAI.FastMode";
+        private const string IncludeConsolePref = "PrimatePanicAI.IncludeConsole";
+        private const string PictureAutoPref = "PrimatePanicAI.PictureAutoApply";
+
+        private WorkspaceMode mode = WorkspaceMode.Agent;
+        private string textModel = "qwen2.5-coder:7b";
+        private string visionModel = "qwen2.5vl:3b";
         private string endpoint = "http://127.0.0.1:11434/api/generate";
-        private string imagePath = "";
-        private string prompt = "Recreate the main object in this reference image as a clean 3D Unity blockout. Ignore Unity editor gizmos, rig/bone lines, transform handles, grids and UI. Match the visible proportions, major shapes and colors as closely as possible.";
+        private bool fastMode = true;
+        private bool includeConsoleErrors = true;
+        private bool pictureAutoCreate = true;
+
+        private string textPrompt = "";
+        private string picturePrompt = "Recreate the main object in this reference image as a clean 3D Unity blockout. Ignore Unity editor gizmos, rig/bone lines, transform handles, grids and UI. Match the visible proportions, major shapes and colors as closely as possible.";
         private string resultText = "";
-        private Texture2D preview;
         private Vector2 scroll;
         private bool waiting;
-        private bool autoApply = true;
-        private RecreationPlan lastPlan;
+
+        private string imagePath = "";
+        private Texture2D preview;
+
+        private AgentPlan lastAgentPlan;
+        private RecreationPlan lastRecreationPlan;
 
         [MenuItem("Tools/Primate Panic AI")]
         public static void Open()
@@ -34,9 +105,13 @@ namespace C3NGAV3R.PrimatePanicAI
 
         private void OnEnable()
         {
-            model = EditorPrefs.GetString(ModelPref, "qwen2.5vl:3b");
+            mode = (WorkspaceMode)Mathf.Clamp(EditorPrefs.GetInt(ModePref, 0), 0, 2);
+            textModel = EditorPrefs.GetString(TextModelPref, "qwen2.5-coder:7b");
+            visionModel = EditorPrefs.GetString(VisionModelPref, "qwen2.5vl:3b");
             endpoint = EditorPrefs.GetString(EndpointPref, "http://127.0.0.1:11434/api/generate");
-            autoApply = EditorPrefs.GetBool(AutoApplyPref, true);
+            fastMode = EditorPrefs.GetBool(FastModePref, true);
+            includeConsoleErrors = EditorPrefs.GetBool(IncludeConsolePref, true);
+            pictureAutoCreate = EditorPrefs.GetBool(PictureAutoPref, true);
         }
 
         private void OnDisable()
@@ -47,82 +122,681 @@ namespace C3NGAV3R.PrimatePanicAI
 
         private void OnGUI()
         {
-            EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Primate Panic AI - PICTURE → UNITY", EditorStyles.boldLabel);
+            EditorGUILayout.Space(7);
+            EditorGUILayout.LabelField("Primate Panic AI - LOCAL", EditorStyles.boldLabel);
+
+            int newMode = GUILayout.Toolbar((int)mode, new[] { "AGENT", "PLAN", "PICTURE → 3D" }, GUILayout.Height(30));
+            if (newMode != (int)mode)
+            {
+                mode = (WorkspaceMode)newMode;
+                EditorPrefs.SetInt(ModePref, newMode);
+                resultText = "Switched to " + GetModeName(mode) + ".";
+            }
+
+            EditorGUILayout.Space(6);
+            EditorGUI.BeginChangeCheck();
+            endpoint = EditorGUILayout.TextField("Ollama URL", endpoint);
+            if (EditorGUI.EndChangeCheck())
+                EditorPrefs.SetString(EndpointPref, endpoint);
+
+            if (mode == WorkspaceMode.PictureTo3D)
+                DrawPictureMode();
+            else
+                DrawTextMode(mode == WorkspaceMode.Plan);
+
+            DrawResult();
+        }
+
+        private static string GetModeName(WorkspaceMode value)
+        {
+            if (value == WorkspaceMode.Agent) return "Agent Mode";
+            if (value == WorkspaceMode.Plan) return "Plan Mode";
+            return "Picture → 3D Mode";
+        }
+
+        private void DrawTextMode(bool planOnly)
+        {
             EditorGUILayout.HelpBox(
-                "Pick a reference picture. A local Ollama vision model analyzes it and builds a 3D Unity blockout directly in your scene using primitives. One flat image cannot recover the exact original mesh, rig or hidden geometry.",
+                planOnly
+                    ? "PLAN MODE: the AI automatically inspects the selected GameObject and attached scripts, then gives a structured change plan. Nothing is changed unless you explicitly click APPLY LAST PLAN."
+                    : "AGENT MODE: the AI automatically inspects the selected GameObject and attached scripts, then directly applies bounded Unity edits. Script replacements are backed up under Library/PrimatePanicAIBackups.",
+                planOnly ? MessageType.Info : MessageType.Warning
+            );
+
+            EditorGUI.BeginChangeCheck();
+            textModel = EditorGUILayout.TextField("Coding Model", textModel);
+            fastMode = EditorGUILayout.ToggleLeft("Fast Mode (recommended)", fastMode);
+            includeConsoleErrors = EditorGUILayout.ToggleLeft("Include recent Console errors", includeConsoleErrors);
+            if (EditorGUI.EndChangeCheck())
+            {
+                EditorPrefs.SetString(TextModelPref, textModel);
+                EditorPrefs.SetBool(FastModePref, fastMode);
+                EditorPrefs.SetBool(IncludeConsolePref, includeConsoleErrors);
+            }
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                if (GUILayout.Button("Use Fast 3B", GUILayout.Height(24)))
+                {
+                    textModel = "qwen2.5-coder:3b";
+                    EditorPrefs.SetString(TextModelPref, textModel);
+                    resultText = "Selected qwen2.5-coder:3b. If needed run once in CMD: ollama run qwen2.5-coder:3b";
+                }
+
+                if (GUILayout.Button("Use Better 7B", GUILayout.Height(24)))
+                {
+                    textModel = "qwen2.5-coder:7b";
+                    EditorPrefs.SetString(TextModelPref, textModel);
+                }
+            }
+
+            GameObject selected = Selection.activeGameObject;
+            EditorGUILayout.Space(4);
+            EditorGUILayout.LabelField("Auto inspection", EditorStyles.boldLabel);
+            EditorGUILayout.HelpBox(
+                selected != null
+                    ? "Selected: " + GetHierarchyPath(selected.transform) + "\nNo Inspect button is needed; RUN AGENT / MAKE PLAN reads it automatically."
+                    : "No GameObject selected. The AI can still create project files, but select an object if you want it to fix components or references.",
+                selected != null ? MessageType.None : MessageType.Warning
+            );
+
+            using (new EditorGUILayout.HorizontalScope())
+            {
+                GUI.enabled = !waiting;
+                if (GUILayout.Button("Test Coding Model", GUILayout.Height(27)))
+                    SendTextTest();
+
+                if (GUILayout.Button("Clear", GUILayout.Height(27)))
+                {
+                    textPrompt = "";
+                    resultText = "";
+                    lastAgentPlan = null;
+                }
+                GUI.enabled = true;
+            }
+
+            EditorGUILayout.Space(5);
+            EditorGUILayout.LabelField(planOnly ? "What should it plan?" : "What should it do?", EditorStyles.boldLabel);
+            textPrompt = EditorGUILayout.TextArea(textPrompt, GUILayout.MinHeight(105));
+
+            GUI.enabled = !waiting && !string.IsNullOrWhiteSpace(textPrompt) && !string.IsNullOrWhiteSpace(textModel);
+            if (GUILayout.Button(waiting ? "WORKING..." : planOnly ? "MAKE PLAN" : "RUN AGENT", GUILayout.Height(38)))
+                SendAgentRequest(!planOnly);
+            GUI.enabled = true;
+
+            if (planOnly && lastAgentPlan != null && lastAgentPlan.actions != null && lastAgentPlan.actions.Length > 0)
+            {
+                EditorGUILayout.Space(4);
+                if (GUILayout.Button("APPLY LAST PLAN", GUILayout.Height(31)))
+                {
+                    resultText += "\n\n" + ApplyAgentPlan(lastAgentPlan);
+                    lastAgentPlan = null;
+                }
+            }
+        }
+
+        private void DrawPictureMode()
+        {
+            EditorGUILayout.HelpBox(
+                "PICTURE → 3D MODE: choose a reference image. The local vision model analyzes the visible object and builds a bounded 3D Unity blockout from primitives. It cannot recover an exact hidden/original mesh from one flat image.",
                 MessageType.Info
             );
 
             EditorGUI.BeginChangeCheck();
-            model = EditorGUILayout.TextField("Vision Model", model);
-            endpoint = EditorGUILayout.TextField("Ollama URL", endpoint);
-            autoApply = EditorGUILayout.ToggleLeft("Create recreation automatically", autoApply);
+            visionModel = EditorGUILayout.TextField("Vision Model", visionModel);
+            pictureAutoCreate = EditorGUILayout.ToggleLeft("Create recreation automatically", pictureAutoCreate);
             if (EditorGUI.EndChangeCheck())
             {
-                EditorPrefs.SetString(ModelPref, model);
-                EditorPrefs.SetString(EndpointPref, endpoint);
-                EditorPrefs.SetBool(AutoApplyPref, autoApply);
+                EditorPrefs.SetString(VisionModelPref, visionModel);
+                EditorPrefs.SetBool(PictureAutoPref, pictureAutoCreate);
             }
 
             using (new EditorGUILayout.HorizontalScope())
             {
                 GUI.enabled = !waiting;
-                if (GUILayout.Button("Test Vision Model", GUILayout.Height(28)))
-                    SendTextTest();
-
-                if (GUILayout.Button("Pick Reference Picture", GUILayout.Height(28)))
+                if (GUILayout.Button("Test Vision Model", GUILayout.Height(27)))
+                    SendVisionTest();
+                if (GUILayout.Button("Pick Picture", GUILayout.Height(27)))
                     PickImage();
-
-                if (GUILayout.Button("Clear Picture", GUILayout.Height(28)))
+                if (GUILayout.Button("Clear Picture", GUILayout.Height(27)))
                     ClearImage();
                 GUI.enabled = true;
             }
 
             if (!string.IsNullOrEmpty(imagePath))
             {
-                EditorGUILayout.Space(6);
-                EditorGUILayout.LabelField("Reference", EditorStyles.boldLabel);
-                EditorGUILayout.LabelField(Path.GetFileName(imagePath));
-
+                EditorGUILayout.Space(5);
+                EditorGUILayout.LabelField("Reference: " + Path.GetFileName(imagePath));
                 if (preview != null)
                 {
                     float maxWidth = Mathf.Max(160f, position.width - 28f);
                     float aspect = preview.height > 0 ? (float)preview.width / preview.height : 1f;
                     float width = Mathf.Min(maxWidth, 440f);
-                    float height = Mathf.Clamp(width / Mathf.Max(0.01f, aspect), 120f, 320f);
+                    float height = Mathf.Clamp(width / Mathf.Max(0.01f, aspect), 110f, 300f);
                     Rect r = GUILayoutUtility.GetRect(width, height, GUILayout.ExpandWidth(false));
                     EditorGUI.DrawPreviewTexture(r, preview, null, ScaleMode.ScaleToFit);
                 }
             }
             else
             {
-                EditorGUILayout.HelpBox("No reference picture selected yet.", MessageType.Warning);
+                EditorGUILayout.HelpBox("No reference picture selected.", MessageType.Warning);
             }
 
-            EditorGUILayout.Space(6);
+            EditorGUILayout.Space(5);
             EditorGUILayout.LabelField("What should it recreate?", EditorStyles.boldLabel);
-            prompt = EditorGUILayout.TextArea(prompt, GUILayout.MinHeight(90));
+            picturePrompt = EditorGUILayout.TextArea(picturePrompt, GUILayout.MinHeight(88));
 
-            GUI.enabled = !waiting && preview != null && !string.IsNullOrWhiteSpace(prompt) && !string.IsNullOrWhiteSpace(model);
+            GUI.enabled = !waiting && preview != null && !string.IsNullOrWhiteSpace(picturePrompt) && !string.IsNullOrWhiteSpace(visionModel);
             if (GUILayout.Button(waiting ? "VISION AI IS BUILDING..." : "RECREATE PICTURE IN UNITY", GUILayout.Height(38)))
                 SendRecreationRequest();
             GUI.enabled = true;
 
-            if (!autoApply && lastPlan != null)
+            if (!pictureAutoCreate && lastRecreationPlan != null)
             {
-                if (GUILayout.Button("CREATE LAST PLAN IN SCENE", GUILayout.Height(32)))
+                if (GUILayout.Button("CREATE LAST PICTURE PLAN IN SCENE", GUILayout.Height(31)))
                 {
-                    resultText += "\n\n" + ApplyPlan(lastPlan);
-                    lastPlan = null;
+                    resultText += "\n\n" + ApplyRecreationPlan(lastRecreationPlan);
+                    lastRecreationPlan = null;
+                }
+            }
+        }
+
+        private void DrawResult()
+        {
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Result", EditorStyles.boldLabel);
+            scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.MinHeight(180));
+            EditorGUILayout.TextArea(resultText, GUILayout.ExpandHeight(true));
+            EditorGUILayout.EndScrollView();
+        }
+
+        private void SendTextTest()
+        {
+            OllamaRequest req = new OllamaRequest
+            {
+                model = textModel.Trim(),
+                prompt = "Reply with exactly: CODING MODEL CONNECTED",
+                stream = false,
+                keep_alive = "15m",
+                options = new OllamaOptions { num_ctx = 2048, num_predict = 32, temperature = 0f }
+            };
+
+            SendOllama(JsonUtility.ToJson(req), "Testing coding model...", 300, text =>
+            {
+                resultText = text.Contains("CODING MODEL CONNECTED") ? "CODING MODEL CONNECTED ✅" : "CODING MODEL REPLIED:\n" + text;
+            });
+        }
+
+        private void SendVisionTest()
+        {
+            OllamaVisionRequest req = new OllamaVisionRequest
+            {
+                model = visionModel.Trim(),
+                prompt = "Reply with exactly: VISION MODEL CONNECTED",
+                stream = false,
+                format = "",
+                images = null,
+                keep_alive = "15m",
+                options = new OllamaOptions { num_ctx = 2048, num_predict = 32, temperature = 0f }
+            };
+
+            SendOllama(JsonUtility.ToJson(req), "Testing vision model...", 300, text =>
+            {
+                resultText = text.Contains("VISION MODEL CONNECTED") ? "VISION MODEL CONNECTED ✅" : "VISION MODEL REPLIED:\n" + text;
+            });
+        }
+
+        private void SendAgentRequest(bool applyImmediately)
+        {
+            string context = BuildUserRequestWithContext(true);
+            OllamaAgentRequest req = new OllamaAgentRequest
+            {
+                model = textModel.Trim(),
+                system = BuildAgentSystemPrompt(),
+                prompt = context,
+                stream = false,
+                format = "json",
+                keep_alive = "15m",
+                options = new OllamaOptions
+                {
+                    temperature = 0.1f,
+                    num_ctx = fastMode ? 4096 : 8192,
+                    num_predict = fastMode ? 2800 : 5200
+                }
+            };
+
+            SendOllama(JsonUtility.ToJson(req), applyImmediately ? "Agent is inspecting and applying..." : "AI is building a safe plan...", 300,
+                text => HandleAgentResponse(text, applyImmediately));
+        }
+
+        private string BuildUserRequestWithContext(bool includeScriptSource)
+        {
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("USER REQUEST:");
+            sb.AppendLine(textPrompt.Trim());
+            sb.AppendLine();
+            sb.AppendLine(BuildSelectedObjectContext(includeScriptSource));
+
+            if (includeConsoleErrors)
+            {
+                sb.AppendLine();
+                sb.AppendLine("RECENT UNITY CONSOLE ERRORS (IN MEMORY, BOUNDED):");
+                sb.AppendLine(PrimatePanicAIRecentLogs.GetRecent(fastMode ? 6 : 12));
+            }
+
+            return sb.ToString();
+        }
+
+        private string BuildSelectedObjectContext(bool includeScriptSource)
+        {
+            GameObject go = Selection.activeGameObject;
+            if (go == null)
+                return "SELECTED GAMEOBJECT: NONE";
+
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("SELECTED GAMEOBJECT:");
+            sb.AppendLine("Name: " + go.name);
+            sb.AppendLine("Hierarchy path: " + GetHierarchyPath(go.transform));
+            sb.AppendLine("Active self: " + go.activeSelf);
+            sb.AppendLine("Layer: " + LayerMask.LayerToName(go.layer));
+            sb.AppendLine("Tag: " + go.tag);
+            sb.AppendLine("Local position: " + go.transform.localPosition);
+            sb.AppendLine("Local rotation: " + go.transform.localEulerAngles);
+            sb.AppendLine("Local scale: " + go.transform.localScale);
+            sb.AppendLine("Parent: " + (go.transform.parent != null ? go.transform.parent.name : "NONE"));
+            sb.AppendLine("Components:");
+
+            int scriptCharacters = 0;
+            int maxScriptCharacters = fastMode ? 10000 : 30000;
+            int maxSingleScript = fastMode ? 8000 : 18000;
+
+            foreach (Component c in go.GetComponents<Component>())
+            {
+                if (c == null)
+                {
+                    sb.AppendLine("- MISSING SCRIPT / NULL COMPONENT");
+                    continue;
+                }
+
+                Type componentType = c.GetType();
+                sb.AppendLine("- " + componentType.FullName);
+
+                if (c is Rigidbody rb)
+                    sb.AppendLine("  mass=" + rb.mass + ", gravity=" + rb.useGravity + ", kinematic=" + rb.isKinematic + ", constraints=" + rb.constraints);
+                else if (c is Collider col)
+                    sb.AppendLine("  collider enabled=" + col.enabled + ", trigger=" + col.isTrigger);
+                else if (c is Animator animator)
+                    sb.AppendLine("  animator enabled=" + animator.enabled + ", rootMotion=" + animator.applyRootMotion);
+
+                MonoBehaviour behaviour = c as MonoBehaviour;
+                if (behaviour == null)
+                    continue;
+
+                MonoScript script = MonoScript.FromMonoBehaviour(behaviour);
+                if (script == null)
+                    continue;
+
+                string assetPath = AssetDatabase.GetAssetPath(script);
+                sb.AppendLine("  Script path: " + assetPath);
+
+                if (!includeScriptSource || scriptCharacters >= maxScriptCharacters || string.IsNullOrEmpty(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                string fullPath = AssetPathToFullPath(assetPath);
+                if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath))
+                    continue;
+
+                try
+                {
+                    string source = File.ReadAllText(fullPath);
+                    int remaining = maxScriptCharacters - scriptCharacters;
+                    int allowed = Mathf.Min(maxSingleScript, remaining);
+                    if (source.Length > allowed)
+                        source = source.Substring(0, allowed) + "\n// SOURCE TRUNCATED BY FAST AGENT";
+
+                    scriptCharacters += source.Length;
+                    sb.AppendLine("  BEGIN SCRIPT SOURCE");
+                    sb.AppendLine(source);
+                    sb.AppendLine("  END SCRIPT SOURCE");
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("  Could not read script source: " + ex.Message);
                 }
             }
 
-            EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Result", EditorStyles.boldLabel);
-            scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.MinHeight(170));
-            EditorGUILayout.TextArea(resultText, GUILayout.ExpandHeight(true));
-            EditorGUILayout.EndScrollView();
+            return sb.ToString();
+        }
+
+        private void HandleAgentResponse(string modelText, bool applyImmediately)
+        {
+            try
+            {
+                AgentPlan plan = JsonUtility.FromJson<AgentPlan>(ExtractJsonObject(modelText));
+                if (plan == null)
+                {
+                    resultText = "The model did not return a usable agent plan.\n\n" + modelText;
+                    return;
+                }
+
+                lastAgentPlan = plan;
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(string.IsNullOrWhiteSpace(plan.message) ? "AI returned a plan." : plan.message);
+                int count = plan.actions != null ? plan.actions.Length : 0;
+                sb.AppendLine("Planned actions: " + count);
+
+                if (applyImmediately && count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine(ApplyAgentPlan(plan));
+                    lastAgentPlan = null;
+                }
+                else if (count > 0)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("PLAN MODE: nothing has been changed.");
+                    for (int i = 0; i < plan.actions.Length; i++)
+                        sb.AppendLine((i + 1) + ". " + DescribeAction(plan.actions[i]));
+                }
+
+                resultText = sb.ToString();
+            }
+            catch (Exception ex)
+            {
+                resultText = "Could not parse the agent plan: " + ex.Message + "\n\nMODEL RESPONSE:\n" + modelText;
+            }
+        }
+
+        private string ApplyAgentPlan(AgentPlan plan)
+        {
+            if (plan.actions == null || plan.actions.Length == 0)
+                return "No project changes were requested.";
+
+            StringBuilder sb = new StringBuilder();
+            sb.AppendLine("APPLYING AGENT ACTIONS:");
+            bool wroteFiles = false;
+
+            for (int i = 0; i < plan.actions.Length; i++)
+            {
+                AgentAction action = plan.actions[i];
+                GameObject target = ResolveTarget(action.targetPath) ?? Selection.activeGameObject;
+
+                try
+                {
+                    string result;
+                    switch ((action.type ?? "").Trim().ToLowerInvariant())
+                    {
+                        case "create_or_replace_file":
+                            result = ApplyFileAction(action);
+                            wroteFiles = true;
+                            break;
+                        case "add_component":
+                            result = ApplyAddComponent(target, action);
+                            break;
+                        case "remove_component":
+                            result = ApplyRemoveComponent(target, action);
+                            break;
+                        case "set_active":
+                            result = ApplySetActive(target, action);
+                            break;
+                        case "set_local_position":
+                            result = ApplyTransform(target, action, "position");
+                            break;
+                        case "set_local_rotation":
+                            result = ApplyTransform(target, action, "rotation");
+                            break;
+                        case "set_local_scale":
+                            result = ApplyTransform(target, action, "scale");
+                            break;
+                        case "set_component_field":
+                            result = ApplyComponentField(target, action);
+                            break;
+                        default:
+                            result = "SKIPPED unknown action: " + action.type;
+                            break;
+                    }
+                    sb.AppendLine("✅ " + result);
+                }
+                catch (Exception ex)
+                {
+                    sb.AppendLine("❌ " + DescribeAction(action) + " -> " + ex.Message);
+                }
+            }
+
+            if (wroteFiles)
+                AssetDatabase.Refresh();
+
+            GameObject selected = Selection.activeGameObject;
+            if (selected != null && selected.scene.IsValid())
+                EditorSceneManager.MarkSceneDirty(selected.scene);
+
+            sb.AppendLine("Done. If Unity recompiles scripts, wait for compilation before testing or running Agent again.");
+            return sb.ToString();
+        }
+
+        private static string ApplyFileAction(AgentAction action)
+        {
+            if (string.IsNullOrWhiteSpace(action.path))
+                throw new InvalidOperationException("File action has no path.");
+
+            string normalized = action.path.Replace('\\', '/').Trim();
+            if (!normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("File writes are restricted to Assets/.");
+            if (!normalized.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
+                !normalized.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
+                !normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Only .cs, .json and .txt files may be written.");
+
+            string fullPath = AssetPathToFullPath(normalized);
+            string allowedRoot = Path.GetFullPath(Application.dataPath) + Path.DirectorySeparatorChar;
+            string checkedPath = Path.GetFullPath(fullPath);
+            if (!checkedPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException("Blocked path outside Assets/.");
+
+            string directory = Path.GetDirectoryName(checkedPath);
+            if (!Directory.Exists(directory))
+                Directory.CreateDirectory(directory);
+
+            if (File.Exists(checkedPath))
+            {
+                string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+                string backupRoot = Path.Combine(projectRoot, "Library", "PrimatePanicAIBackups");
+                Directory.CreateDirectory(backupRoot);
+                string safeName = normalized.Replace('/', '_').Replace('\\', '_');
+                string backup = Path.Combine(backupRoot, DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + "_" + safeName);
+                File.Copy(checkedPath, backup, true);
+            }
+
+            File.WriteAllText(checkedPath, action.content ?? "", new UTF8Encoding(false));
+            return "Wrote " + normalized;
+        }
+
+        private static string ApplyAddComponent(GameObject target, AgentAction action)
+        {
+            RequireTarget(target);
+            Type type = FindComponentType(action.componentType);
+            if (type == null)
+                throw new InvalidOperationException("Component type not found: " + action.componentType + ". If a script was just created, wait for Unity to compile and run Agent again.");
+            if (target.GetComponent(type) != null)
+                return target.name + " already has " + type.Name;
+            Undo.AddComponent(target, type);
+            return "Added " + type.Name + " to " + target.name;
+        }
+
+        private static string ApplyRemoveComponent(GameObject target, AgentAction action)
+        {
+            RequireTarget(target);
+            Type type = FindComponentType(action.componentType);
+            if (type == null)
+                throw new InvalidOperationException("Component type not found: " + action.componentType);
+            Component component = target.GetComponent(type);
+            if (component == null)
+                return target.name + " does not have " + type.Name;
+            Undo.DestroyObjectImmediate(component);
+            return "Removed " + type.Name + " from " + target.name;
+        }
+
+        private static string ApplySetActive(GameObject target, AgentAction action)
+        {
+            RequireTarget(target);
+            Undo.RecordObject(target, "Primate Panic AI set active");
+            target.SetActive(action.boolValue);
+            EditorUtility.SetDirty(target);
+            return "Set " + target.name + " active=" + action.boolValue;
+        }
+
+        private static string ApplyTransform(GameObject target, AgentAction action, string kind)
+        {
+            RequireTarget(target);
+            Undo.RecordObject(target.transform, "Primate Panic AI transform");
+            Vector3 v = new Vector3(action.x, action.y, action.z);
+            if (kind == "position") target.transform.localPosition = v;
+            else if (kind == "rotation") target.transform.localEulerAngles = v;
+            else target.transform.localScale = v;
+            EditorUtility.SetDirty(target.transform);
+            return "Set " + target.name + " local " + kind + " to " + v;
+        }
+
+        private static string ApplyComponentField(GameObject target, AgentAction action)
+        {
+            RequireTarget(target);
+            Type type = FindComponentType(action.componentType);
+            if (type == null)
+                throw new InvalidOperationException("Component type not found: " + action.componentType);
+
+            Component component = target.GetComponent(type);
+            if (component == null)
+                throw new InvalidOperationException(target.name + " has no " + type.Name + " component.");
+
+            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            FieldInfo field = type.GetField(action.field ?? "", flags);
+            PropertyInfo property = field == null ? type.GetProperty(action.field ?? "", flags) : null;
+            Type valueType = field != null ? field.FieldType : property != null && property.CanWrite ? property.PropertyType : null;
+            if (valueType == null)
+                throw new InvalidOperationException("Writable field/property not found: " + action.field);
+
+            object converted = ConvertValue(action.value, valueType);
+            Undo.RecordObject(component, "Primate Panic AI set field");
+            if (field != null) field.SetValue(component, converted);
+            else property.SetValue(component, converted, null);
+            EditorUtility.SetDirty(component);
+            return "Set " + type.Name + "." + action.field + " = " + action.value;
+        }
+
+        private static object ConvertValue(string raw, Type type)
+        {
+            raw = raw ?? "";
+            if (type == typeof(string)) return raw;
+            if (type == typeof(bool)) return bool.Parse(raw);
+            if (type == typeof(int)) return int.Parse(raw, CultureInfo.InvariantCulture);
+            if (type == typeof(float)) return float.Parse(raw, CultureInfo.InvariantCulture);
+            if (type == typeof(double)) return double.Parse(raw, CultureInfo.InvariantCulture);
+            if (type.IsEnum) return Enum.Parse(type, raw, true);
+
+            if (type == typeof(Vector3))
+            {
+                string[] p = raw.Replace("(", "").Replace(")", "").Split(',');
+                if (p.Length != 3) throw new FormatException("Vector3 must be x,y,z");
+                return new Vector3(
+                    float.Parse(p[0], CultureInfo.InvariantCulture),
+                    float.Parse(p[1], CultureInfo.InvariantCulture),
+                    float.Parse(p[2], CultureInfo.InvariantCulture));
+            }
+
+            if (typeof(UnityEngine.Object).IsAssignableFrom(type))
+            {
+                if (string.Equals(raw, "NONE", StringComparison.OrdinalIgnoreCase) || string.Equals(raw, "NULL", StringComparison.OrdinalIgnoreCase))
+                    return null;
+
+                GameObject go = ResolveTarget(raw);
+                if (go == null)
+                    throw new InvalidOperationException("Could not find referenced GameObject: " + raw);
+                if (type == typeof(GameObject)) return go;
+                if (type == typeof(Transform)) return go.transform;
+
+                Component c = go.GetComponent(type);
+                if (c == null)
+                    throw new InvalidOperationException(go.name + " has no " + type.Name + " component for reference assignment.");
+                return c;
+            }
+
+            throw new InvalidOperationException("Unsupported field type: " + type.FullName);
+        }
+
+        private static GameObject ResolveTarget(string pathOrName)
+        {
+            if (string.IsNullOrWhiteSpace(pathOrName) || string.Equals(pathOrName, "SELECTED", StringComparison.OrdinalIgnoreCase))
+                return Selection.activeGameObject;
+
+            string wanted = pathOrName.Trim().Trim('/');
+            GameObject[] all = Resources.FindObjectsOfTypeAll<GameObject>();
+            foreach (GameObject go in all)
+            {
+                if (go == null || !go.scene.IsValid())
+                    continue;
+
+                if (string.Equals(GetHierarchyPath(go.transform).Trim('/'), wanted, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(go.name, wanted, StringComparison.OrdinalIgnoreCase))
+                    return go;
+            }
+            return null;
+        }
+
+        private static Type FindComponentType(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                return null;
+
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type direct = assembly.GetType(name, false, true);
+                if (direct != null && typeof(Component).IsAssignableFrom(direct))
+                    return direct;
+
+                try
+                {
+                    Type[] types = assembly.GetTypes();
+                    for (int i = 0; i < types.Length; i++)
+                    {
+                        if (typeof(Component).IsAssignableFrom(types[i]) && string.Equals(types[i].Name, name, StringComparison.OrdinalIgnoreCase))
+                            return types[i];
+                    }
+                }
+                catch (ReflectionTypeLoadException)
+                {
+                }
+            }
+            return null;
+        }
+
+        private static void RequireTarget(GameObject target)
+        {
+            if (target == null)
+                throw new InvalidOperationException("No target GameObject was found. Select the object or provide targetPath.");
+        }
+
+        private static string BuildAgentSystemPrompt()
+        {
+            return
+                "You are an action-taking Unity Editor agent for a Gorilla-style VR game. " +
+                "Do not give generic troubleshooting when a concrete action can be taken. Inspect supplied selected-object data and script source, then return ONLY valid JSON. " +
+                "Schema: {\"message\":\"short result\",\"actions\":[{\"type\":\"...\",\"targetPath\":\"SELECTED or hierarchy path\",\"path\":\"Assets/...\",\"content\":\"full file content\",\"componentType\":\"TypeName\",\"field\":\"fieldName\",\"value\":\"value or referenced GameObject path/name\",\"boolValue\":true,\"x\":0,\"y\":0,\"z\":0}]} . " +
+                "Supported action types: create_or_replace_file, add_component, remove_component, set_active, set_local_position, set_local_rotation, set_local_scale, set_component_field. " +
+                "For an existing broken script, replace that exact Script path with a COMPLETE compiling C# file. Never use ellipses or partial code. " +
+                "Do not add a second Rigidbody when one already exists. Preserve Gorilla locomotion unless the user explicitly requests otherwise. " +
+                "For UnityEngine.Object references, set_component_field.value must be the target GameObject name or hierarchy path. " +
+                "If creating a brand-new MonoBehaviour script, create the file now but do not add the component in the same plan because Unity must compile first. " +
+                "Never request shell commands, PowerShell, executables, registry changes, files outside Assets, or arbitrary project deletion. " +
+                "If there is not enough evidence to safely edit something, return actions:[] and state the ONE specific missing selection/reference in message.";
+        }
+
+        private static string DescribeAction(AgentAction a)
+        {
+            if (a == null) return "null action";
+            return (a.type ?? "unknown") +
+                   (string.IsNullOrEmpty(a.path) ? "" : " " + a.path) +
+                   (string.IsNullOrEmpty(a.componentType) ? "" : " " + a.componentType) +
+                   (string.IsNullOrEmpty(a.field) ? "" : "." + a.field);
         }
 
         private void PickImage()
@@ -147,6 +821,7 @@ namespace C3NGAV3R.PrimatePanicAI
 
                 preview = tex;
                 imagePath = path;
+                lastRecreationPlan = null;
                 resultText = "Reference picture loaded. Ready to recreate.";
                 Repaint();
             }
@@ -164,22 +839,8 @@ namespace C3NGAV3R.PrimatePanicAI
                 DestroyImmediate(preview);
                 preview = null;
             }
-            lastPlan = null;
+            lastRecreationPlan = null;
             resultText = "Picture cleared.";
-        }
-
-        private void SendTextTest()
-        {
-            OllamaVisionRequest req = new OllamaVisionRequest
-            {
-                model = model.Trim(),
-                prompt = "Reply with exactly: VISION MODEL CONNECTED",
-                stream = false,
-                format = "",
-                images = null,
-                options = new OllamaOptions { num_ctx = 2048, num_predict = 32, temperature = 0f }
-            };
-            SendOllama(JsonUtility.ToJson(req), false, true);
         }
 
         private void SendRecreationRequest()
@@ -187,15 +848,14 @@ namespace C3NGAV3R.PrimatePanicAI
             try
             {
                 string imageBase64 = BuildOptimizedImageBase64(preview, 896);
-                string fullPrompt = BuildVisionPrompt(prompt);
-
                 OllamaVisionRequest req = new OllamaVisionRequest
                 {
-                    model = model.Trim(),
-                    prompt = fullPrompt,
+                    model = visionModel.Trim(),
+                    prompt = BuildVisionPrompt(picturePrompt),
                     stream = false,
                     format = "json",
                     images = new[] { imageBase64 },
+                    keep_alive = "15m",
                     options = new OllamaOptions
                     {
                         num_ctx = 8192,
@@ -204,7 +864,7 @@ namespace C3NGAV3R.PrimatePanicAI
                     }
                 };
 
-                SendOllama(JsonUtility.ToJson(req), true, false);
+                SendOllama(JsonUtility.ToJson(req), "Vision model is analyzing the picture...", 600, HandleRecreationResponse);
             }
             catch (Exception ex)
             {
@@ -212,11 +872,11 @@ namespace C3NGAV3R.PrimatePanicAI
             }
         }
 
-        private string BuildVisionPrompt(string userRequest)
+        private static string BuildVisionPrompt(string userRequest)
         {
             return
                 "You are a Unity 3D reconstruction agent. Analyze the attached reference image and return ONLY valid JSON. " +
-                "Create a recognizable 3D BLOCKOUT from Unity primitives. Ignore editor UI, scene gizmos, red/blue rig handles, bone lines, transform arrows, grids, cameras and lights unless the user explicitly asks for them. " +
+                "Create a recognizable 3D BLOCKOUT from Unity primitives. Ignore editor UI, scene gizmos, red/blue rig handles, bone lines, transform arrows, grids, cameras and lights unless explicitly requested. " +
                 "Focus on the actual visible object. Use meters and keep the complete reconstruction roughly 1 to 2.5 meters tall. " +
                 "Prefer 8-35 meaningful parts; maximum 60. Use symmetry when appropriate. Available primitives: Cube, Sphere, Capsule, Cylinder, Plane, Quad. " +
                 "Each object needs a unique id. parentId may be empty or the id of an earlier object. position/rotation/scale are LOCAL to the parent. " +
@@ -227,62 +887,11 @@ namespace C3NGAV3R.PrimatePanicAI
                 "Do not include markdown fences or explanations outside JSON. USER REQUEST: " + userRequest;
         }
 
-        private void SendOllama(string json, bool recreationMode, bool connectionTest)
-        {
-            if (string.IsNullOrWhiteSpace(endpoint))
-            {
-                resultText = "Ollama URL is empty.";
-                return;
-            }
-
-            waiting = true;
-            resultText = connectionTest ? "Testing vision model..." : "Vision model is analyzing the picture...";
-            Repaint();
-
-            UnityWebRequest request = new UnityWebRequest(endpoint.Trim(), "POST");
-            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-            request.downloadHandler = new DownloadHandlerBuffer();
-            request.SetRequestHeader("Content-Type", "application/json");
-            request.timeout = 600;
-
-            var op = request.SendWebRequest();
-            op.completed += _ =>
-            {
-                waiting = false;
-                if (request.result != UnityWebRequest.Result.Success)
-                {
-                    resultText = "OLLAMA REQUEST FAILED\nHTTP " + request.responseCode + "\n" + request.error + "\n\n" + request.downloadHandler.text;
-                }
-                else
-                {
-                    string text = ExtractOllamaText(request.downloadHandler.text);
-                    if (connectionTest)
-                    {
-                        resultText = text.Contains("VISION MODEL CONNECTED")
-                            ? "VISION MODEL CONNECTED ✅"
-                            : "VISION MODEL REPLIED:\n" + text;
-                    }
-                    else if (recreationMode)
-                    {
-                        HandleRecreationResponse(text);
-                    }
-                    else
-                    {
-                        resultText = text;
-                    }
-                }
-
-                request.Dispose();
-                Repaint();
-            };
-        }
-
         private void HandleRecreationResponse(string modelText)
         {
             try
             {
-                string json = ExtractJsonObject(modelText);
-                RecreationPlan plan = JsonUtility.FromJson<RecreationPlan>(json);
+                RecreationPlan plan = JsonUtility.FromJson<RecreationPlan>(ExtractJsonObject(modelText));
                 if (plan == null || plan.objects == null || plan.objects.Length == 0)
                 {
                     resultText = "Vision model did not return a usable 3D plan.\n\n" + modelText;
@@ -296,27 +905,26 @@ namespace C3NGAV3R.PrimatePanicAI
                     plan.objects = bounded;
                 }
 
-                lastPlan = plan;
-                resultText = (string.IsNullOrWhiteSpace(plan.message) ? "3D recreation planned." : plan.message) +
-                             "\nParts: " + plan.objects.Length;
+                lastRecreationPlan = plan;
+                resultText = (string.IsNullOrWhiteSpace(plan.message) ? "3D recreation planned." : plan.message) + "\nParts: " + plan.objects.Length;
 
-                if (autoApply)
+                if (pictureAutoCreate)
                 {
-                    resultText += "\n\n" + ApplyPlan(plan);
-                    lastPlan = null;
+                    resultText += "\n\n" + ApplyRecreationPlan(plan);
+                    lastRecreationPlan = null;
                 }
                 else
                 {
-                    resultText += "\nAuto-create is OFF. Click CREATE LAST PLAN IN SCENE.";
+                    resultText += "\nAuto-create is OFF. Click CREATE LAST PICTURE PLAN IN SCENE.";
                 }
             }
             catch (Exception ex)
             {
-                resultText = "Could not parse the vision model plan: " + ex.Message + "\n\nMODEL RESPONSE:\n" + modelText;
+                resultText = "Could not parse the vision plan: " + ex.Message + "\n\nMODEL RESPONSE:\n" + modelText;
             }
         }
 
-        private string ApplyPlan(RecreationPlan plan)
+        private string ApplyRecreationPlan(RecreationPlan plan)
         {
             string rootName = SanitizeName(string.IsNullOrWhiteSpace(plan.rootName) ? "AI_Recreation" : plan.rootName);
             GameObject root = new GameObject(rootName);
@@ -338,14 +946,14 @@ namespace C3NGAV3R.PrimatePanicAI
                 go.name = SanitizeName(string.IsNullOrWhiteSpace(item.name) ? item.id : item.name);
 
                 Transform parent = root.transform;
-                if (!string.IsNullOrWhiteSpace(item.parentId) && created.TryGetValue(item.parentId, out GameObject parentObject))
+                GameObject parentObject;
+                if (!string.IsNullOrWhiteSpace(item.parentId) && created.TryGetValue(item.parentId, out parentObject))
                     parent = parentObject.transform;
 
                 go.transform.SetParent(parent, false);
                 go.transform.localPosition = ToVector(item.position, Vector3.zero);
                 go.transform.localEulerAngles = ToVector(item.rotation, Vector3.zero);
                 go.transform.localScale = ClampScale(ToVector(item.scale, Vector3.one));
-
                 ApplyColor(go, item.color);
 
                 if (!item.keepCollider)
@@ -364,7 +972,7 @@ namespace C3NGAV3R.PrimatePanicAI
             if (root.scene.IsValid())
                 EditorSceneManager.MarkSceneDirty(root.scene);
 
-            return "✅ Created " + made + " 3D parts under '" + root.name + "'.\nYou can move/scale the root as one object. Ctrl+Z will undo the recreation.";
+            return "✅ Created " + made + " 3D parts under '" + root.name + "'. Ctrl+Z will undo the recreation.";
         }
 
         private static void ApplyColor(GameObject go, string hex)
@@ -381,10 +989,8 @@ namespace C3NGAV3R.PrimatePanicAI
                 return;
 
             Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null)
-                shader = Shader.Find("Standard");
-            if (shader == null)
-                return;
+            if (shader == null) shader = Shader.Find("Standard");
+            if (shader == null) return;
 
             Material material = new Material(shader);
             material.name = "AI_" + go.name + "_Mat";
@@ -420,14 +1026,61 @@ namespace C3NGAV3R.PrimatePanicAI
             return Convert.ToBase64String(jpg);
         }
 
-        private static string ExtractOllamaText(string json)
+        private void SendOllama(string json, string workingMessage, int timeoutSeconds, Action<string> onSuccess)
         {
-            OllamaResponse response = JsonUtility.FromJson<OllamaResponse>(json);
-            if (response == null)
-                return "Ollama returned an empty response.";
-            if (!string.IsNullOrEmpty(response.error))
-                return "OLLAMA ERROR: " + response.error;
-            return response.response ?? "";
+            if (string.IsNullOrWhiteSpace(endpoint))
+            {
+                resultText = "Ollama URL is empty.";
+                return;
+            }
+
+            waiting = true;
+            resultText = workingMessage;
+            Repaint();
+
+            UnityWebRequest request = new UnityWebRequest(endpoint.Trim(), "POST");
+            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
+            request.downloadHandler = new DownloadHandlerBuffer();
+            request.SetRequestHeader("Content-Type", "application/json");
+            request.timeout = timeoutSeconds;
+
+            UnityWebRequestAsyncOperation op = request.SendWebRequest();
+            op.completed += _ =>
+            {
+                waiting = false;
+                if (request.result != UnityWebRequest.Result.Success)
+                {
+                    resultText = "OLLAMA REQUEST FAILED\nHTTP " + request.responseCode + "\n" + request.error + "\n\n" + request.downloadHandler.text;
+                }
+                else
+                {
+                    string text = ExtractOllamaText(request.downloadHandler.text);
+                    onSuccess(text);
+                }
+
+                request.Dispose();
+                Repaint();
+            };
+        }
+
+        private static string GetHierarchyPath(Transform t)
+        {
+            if (t == null) return "";
+            List<string> names = new List<string>();
+            while (t != null)
+            {
+                names.Add(t.name);
+                t = t.parent;
+            }
+            names.Reverse();
+            return string.Join("/", names.ToArray());
+        }
+
+        private static string AssetPathToFullPath(string assetPath)
+        {
+            if (string.IsNullOrWhiteSpace(assetPath)) return null;
+            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
+            return Path.GetFullPath(Path.Combine(projectRoot, assetPath.Replace('/', Path.DirectorySeparatorChar)));
         }
 
         private static string ExtractJsonObject(string text)
@@ -449,6 +1102,21 @@ namespace C3NGAV3R.PrimatePanicAI
             if (start < 0 || end <= start)
                 throw new InvalidOperationException("No JSON object was found.");
             return trimmed.Substring(start, end - start + 1);
+        }
+
+        private static string ExtractOllamaText(string json)
+        {
+            try
+            {
+                OllamaResponse response = JsonUtility.FromJson<OllamaResponse>(json);
+                if (response == null) return "Ollama returned an empty response.";
+                if (!string.IsNullOrEmpty(response.error)) return "OLLAMA ERROR: " + response.error;
+                return response.response ?? "";
+            }
+            catch (Exception ex)
+            {
+                return "Could not parse Ollama response: " + ex.Message + "\n\nRaw response:\n" + json;
+            }
         }
 
         private static bool TryPrimitive(string value, out PrimitiveType type)
@@ -480,9 +1148,30 @@ namespace C3NGAV3R.PrimatePanicAI
 
         private static string SanitizeName(string value)
         {
-            if (string.IsNullOrWhiteSpace(value))
-                return "AI_Part";
+            if (string.IsNullOrWhiteSpace(value)) return "AI_Part";
             return value.Replace('/', '_').Replace('\\', '_').Trim();
+        }
+
+        [Serializable]
+        private class OllamaRequest
+        {
+            public string model;
+            public string prompt;
+            public bool stream;
+            public string keep_alive;
+            public OllamaOptions options;
+        }
+
+        [Serializable]
+        private class OllamaAgentRequest
+        {
+            public string model;
+            public string system;
+            public string prompt;
+            public bool stream;
+            public string format;
+            public string keep_alive;
+            public OllamaOptions options;
         }
 
         [Serializable]
@@ -493,6 +1182,7 @@ namespace C3NGAV3R.PrimatePanicAI
             public bool stream;
             public string format;
             public string[] images;
+            public string keep_alive;
             public OllamaOptions options;
         }
 
@@ -509,6 +1199,29 @@ namespace C3NGAV3R.PrimatePanicAI
         {
             public string response;
             public string error;
+        }
+
+        [Serializable]
+        private class AgentPlan
+        {
+            public string message;
+            public AgentAction[] actions;
+        }
+
+        [Serializable]
+        private class AgentAction
+        {
+            public string type;
+            public string targetPath;
+            public string path;
+            public string content;
+            public string componentType;
+            public string field;
+            public string value;
+            public bool boolValue;
+            public float x;
+            public float y;
+            public float z;
         }
 
         [Serializable]
