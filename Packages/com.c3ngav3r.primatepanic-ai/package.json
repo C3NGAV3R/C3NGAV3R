@@ -1,6 +1,6 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "displayName": "Primate Panic AI",
   "description": "Unity Editor AI helper for Primate Panic. Includes chat, selected GameObject inspection, and local OpenAI API key configuration.",
   "unity": "2022.3",
