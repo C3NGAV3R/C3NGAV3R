@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "displayName": "Primate Panic AI",
-  "description": "Local multi-mode Unity AI tool powered by Ollama. v0.8 adds resilient UI execution: image actions, component inference, last-created targeting, Vector2 RectTransform edits, and automatic script paths.",
+  "description": "Local multi-mode Unity AI tool powered by Ollama. v0.9 adds automatic invalid-JSON regeneration, strict action schemas, safer asset rules, and real separate-scene creation/saving for menus and loading screens.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
