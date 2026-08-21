@@ -1,0 +1,14 @@
+{
+  "name": "C3NGAV3R.PrimatePanicAI.Editor",
+  "rootNamespace": "C3NGAV3R.PrimatePanicAI",
+  "references": [],
+  "includePlatforms": ["Editor"],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
