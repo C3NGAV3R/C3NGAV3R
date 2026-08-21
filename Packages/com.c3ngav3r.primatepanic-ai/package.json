@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "displayName": "Primate Panic AI",
-  "description": "Local Unity Editor AI helper for Primate Panic powered by Ollama. Includes chat and selected GameObject inspection with no paid API key required.",
+  "description": "Local Unity Editor AI agent for Primate Panic powered by Ollama. Can inspect selected objects, read attached script source, and apply bounded project edits directly.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
