@@ -86,7 +86,7 @@ namespace C3NGAV3R.PrimatePanicAI
         private bool pictureAutoCreate = true;
 
         private string textPrompt = "";
-        private string picturePrompt = "Recreate the main object in this reference image as a clean 3D Unity blockout. Ignore Unity editor gizmos, rig/bone lines, transform handles, grids and UI. Match the visible proportions, major shapes and colors as closely as possible.";
+        private string picturePrompt = "Recreate the main object in this reference image as a clean 3D Unity blockout. Ignore Unity editor gizmos, rig/bone lines, transform handles, grids and UI. Match visible proportions, major shapes and colors as closely as possible.";
         private string resultText = "";
         private Vector2 scroll;
         private bool waiting;
@@ -123,7 +123,7 @@ namespace C3NGAV3R.PrimatePanicAI
         private void OnGUI()
         {
             EditorGUILayout.Space(7);
-            EditorGUILayout.LabelField("Primate Panic AI - LOCAL", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Primate Panic AI - LOCAL v0.6", EditorStyles.boldLabel);
 
             int newMode = GUILayout.Toolbar((int)mode, new[] { "AGENT", "PLAN", "PICTURE → 3D" }, GUILayout.Height(30));
             if (newMode != (int)mode)
@@ -158,8 +158,8 @@ namespace C3NGAV3R.PrimatePanicAI
         {
             EditorGUILayout.HelpBox(
                 planOnly
-                    ? "PLAN MODE: the AI automatically inspects the selected GameObject and attached scripts, then gives a structured change plan. Nothing is changed unless you explicitly click APPLY LAST PLAN."
-                    : "AGENT MODE: the AI automatically inspects the selected GameObject and attached scripts, then directly applies bounded Unity edits. Script replacements are backed up under Library/PrimatePanicAIBackups.",
+                    ? "PLAN MODE: AI inspects automatically and builds a plan. Nothing changes until you press APPLY LAST PLAN. Creation requests do NOT require a selection."
+                    : "AGENT MODE: AI can fix selected objects OR create brand-new systems from nothing. If no selection is needed, it creates its own root GameObject and continues automatically.",
                 planOnly ? MessageType.Info : MessageType.Warning
             );
 
@@ -195,9 +195,9 @@ namespace C3NGAV3R.PrimatePanicAI
             EditorGUILayout.LabelField("Auto inspection", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
                 selected != null
-                    ? "Selected: " + GetHierarchyPath(selected.transform) + "\nNo Inspect button is needed; RUN AGENT / MAKE PLAN reads it automatically."
-                    : "No GameObject selected. The AI can still create project files, but select an object if you want it to fix components or references.",
-                selected != null ? MessageType.None : MessageType.Warning
+                    ? "Selected: " + GetHierarchyPath(selected.transform) + "\nAgent/Plan reads it automatically. If your request is unrelated to this object, the AI may create a new root instead."
+                    : "Nothing selected. That's OK. Creation requests like menus, loading screens, managers, systems, portals, buttons and new setups will create new GameObjects automatically.",
+                MessageType.None
             );
 
             using (new EditorGUILayout.HorizontalScope())
@@ -238,7 +238,7 @@ namespace C3NGAV3R.PrimatePanicAI
         private void DrawPictureMode()
         {
             EditorGUILayout.HelpBox(
-                "PICTURE → 3D MODE: choose a reference image. The local vision model analyzes the visible object and builds a bounded 3D Unity blockout from primitives. It cannot recover an exact hidden/original mesh from one flat image.",
+                "PICTURE → 3D MODE: choose a reference image. The local vision model analyzes the visible object and builds a bounded 3D Unity blockout from primitives.",
                 MessageType.Info
             );
 
@@ -359,14 +359,18 @@ namespace C3NGAV3R.PrimatePanicAI
                 keep_alive = "15m",
                 options = new OllamaOptions
                 {
-                    temperature = 0.1f,
+                    temperature = 0.05f,
                     num_ctx = fastMode ? 4096 : 8192,
-                    num_predict = fastMode ? 2800 : 5200
+                    num_predict = fastMode ? 3200 : 5600
                 }
             };
 
-            SendOllama(JsonUtility.ToJson(req), applyImmediately ? "Agent is inspecting and applying..." : "AI is building a safe plan...", 300,
-                text => HandleAgentResponse(text, applyImmediately));
+            SendOllama(
+                JsonUtility.ToJson(req),
+                applyImmediately ? "Agent is building/fixing it now..." : "AI is building a safe plan...",
+                300,
+                text => HandleAgentResponse(text, applyImmediately)
+            );
         }
 
         private string BuildUserRequestWithContext(bool includeScriptSource)
@@ -391,7 +395,11 @@ namespace C3NGAV3R.PrimatePanicAI
         {
             GameObject go = Selection.activeGameObject;
             if (go == null)
-                return "SELECTED GAMEOBJECT: NONE";
+            {
+                return
+                    "SELECTED GAMEOBJECT: NONE\n" +
+                    "IMPORTANT: No selection is NOT a blocker for creation requests. If the user asks to make/create/add a new menu, loading screen, manager, system, portal, button setup, environment object, or other new feature, create a new root GameObject and continue. Only require a selection when the request clearly targets a specific existing object.";
+            }
 
             StringBuilder sb = new StringBuilder();
             sb.AppendLine("SELECTED GAMEOBJECT:");
@@ -498,6 +506,11 @@ namespace C3NGAV3R.PrimatePanicAI
                     for (int i = 0; i < plan.actions.Length; i++)
                         sb.AppendLine((i + 1) + ". " + DescribeAction(plan.actions[i]));
                 }
+                else if (applyImmediately)
+                {
+                    sb.AppendLine();
+                    sb.AppendLine("The model returned zero actions. For a creation request, try wording it as: CREATE this from scratch and make all needed GameObjects automatically.");
+                }
 
                 resultText = sb.ToString();
             }
@@ -519,42 +532,53 @@ namespace C3NGAV3R.PrimatePanicAI
             for (int i = 0; i < plan.actions.Length; i++)
             {
                 AgentAction action = plan.actions[i];
-                GameObject target = ResolveTarget(action.targetPath) ?? Selection.activeGameObject;
 
                 try
                 {
                     string result;
-                    switch ((action.type ?? "").Trim().ToLowerInvariant())
+                    string type = (action.type ?? "").Trim().ToLowerInvariant();
+
+                    if (type == "create_gameobject")
                     {
-                        case "create_or_replace_file":
-                            result = ApplyFileAction(action);
-                            wroteFiles = true;
-                            break;
-                        case "add_component":
-                            result = ApplyAddComponent(target, action);
-                            break;
-                        case "remove_component":
-                            result = ApplyRemoveComponent(target, action);
-                            break;
-                        case "set_active":
-                            result = ApplySetActive(target, action);
-                            break;
-                        case "set_local_position":
-                            result = ApplyTransform(target, action, "position");
-                            break;
-                        case "set_local_rotation":
-                            result = ApplyTransform(target, action, "rotation");
-                            break;
-                        case "set_local_scale":
-                            result = ApplyTransform(target, action, "scale");
-                            break;
-                        case "set_component_field":
-                            result = ApplyComponentField(target, action);
-                            break;
-                        default:
-                            result = "SKIPPED unknown action: " + action.type;
-                            break;
+                        result = ApplyCreateGameObject(action);
                     }
+                    else
+                    {
+                        GameObject target = ResolveTarget(action.targetPath) ?? Selection.activeGameObject;
+
+                        switch (type)
+                        {
+                            case "create_or_replace_file":
+                                result = ApplyFileAction(action);
+                                wroteFiles = true;
+                                break;
+                            case "add_component":
+                                result = ApplyAddComponent(target, action);
+                                break;
+                            case "remove_component":
+                                result = ApplyRemoveComponent(target, action);
+                                break;
+                            case "set_active":
+                                result = ApplySetActive(target, action);
+                                break;
+                            case "set_local_position":
+                                result = ApplyTransform(target, action, "position");
+                                break;
+                            case "set_local_rotation":
+                                result = ApplyTransform(target, action, "rotation");
+                                break;
+                            case "set_local_scale":
+                                result = ApplyTransform(target, action, "scale");
+                                break;
+                            case "set_component_field":
+                                result = ApplyComponentField(target, action);
+                                break;
+                            default:
+                                result = "SKIPPED unknown action: " + action.type;
+                                break;
+                        }
+                    }
+
                     sb.AppendLine("✅ " + result);
                 }
                 catch (Exception ex)
@@ -570,8 +594,55 @@ namespace C3NGAV3R.PrimatePanicAI
             if (selected != null && selected.scene.IsValid())
                 EditorSceneManager.MarkSceneDirty(selected.scene);
 
-            sb.AppendLine("Done. If Unity recompiles scripts, wait for compilation before testing or running Agent again.");
+            sb.AppendLine("Done. If Unity recompiles a newly-created script, wait for compilation before asking the agent to attach that new custom script.");
             return sb.ToString();
+        }
+
+        private static string ApplyCreateGameObject(AgentAction action)
+        {
+            string objectName = SanitizeName(string.IsNullOrWhiteSpace(action.name) ? "AI_CreatedObject" : action.name);
+            GameObject go;
+
+            if (!string.IsNullOrWhiteSpace(action.primitive))
+            {
+                PrimitiveType primitiveType;
+                if (!TryPrimitive(action.primitive, out primitiveType))
+                    throw new InvalidOperationException("Unknown primitive for create_gameobject: " + action.primitive);
+                go = GameObject.CreatePrimitive(primitiveType);
+                go.name = objectName;
+            }
+            else if (string.Equals(action.componentType, "RectTransform", StringComparison.OrdinalIgnoreCase) ||
+                     string.Equals(action.componentType, "UnityEngine.RectTransform", StringComparison.OrdinalIgnoreCase))
+            {
+                go = new GameObject(objectName, typeof(RectTransform));
+            }
+            else
+            {
+                go = new GameObject(objectName);
+            }
+
+            Undo.RegisterCreatedObjectUndo(go, "Primate Panic AI create GameObject");
+
+            if (!string.IsNullOrWhiteSpace(action.parentPath) &&
+                !string.Equals(action.parentPath, "NONE", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(action.parentPath, "ROOT", StringComparison.OrdinalIgnoreCase))
+            {
+                GameObject parent = ResolveTarget(action.parentPath);
+                if (parent != null)
+                    go.transform.SetParent(parent.transform, false);
+            }
+
+            go.transform.localPosition = new Vector3(action.x, action.y, action.z);
+
+            bool active = !string.Equals(action.value, "false", StringComparison.OrdinalIgnoreCase);
+            go.SetActive(active);
+
+            Selection.activeGameObject = go;
+            EditorGUIUtility.PingObject(go);
+            if (go.scene.IsValid())
+                EditorSceneManager.MarkSceneDirty(go.scene);
+
+            return "Created GameObject '" + go.name + "'" + (go.transform.parent != null ? " under '" + go.transform.parent.name + "'" : "");
         }
 
         private static string ApplyFileAction(AgentAction action)
@@ -616,7 +687,7 @@ namespace C3NGAV3R.PrimatePanicAI
             RequireTarget(target);
             Type type = FindComponentType(action.componentType);
             if (type == null)
-                throw new InvalidOperationException("Component type not found: " + action.componentType + ". If a script was just created, wait for Unity to compile and run Agent again.");
+                throw new InvalidOperationException("Component type not found: " + action.componentType + ". If a custom script was just created, wait for Unity to compile and run Agent once more.");
             if (target.GetComponent(type) != null)
                 return target.name + " already has " + type.Name;
             Undo.AddComponent(target, type);
@@ -693,6 +764,15 @@ namespace C3NGAV3R.PrimatePanicAI
             if (type == typeof(double)) return double.Parse(raw, CultureInfo.InvariantCulture);
             if (type.IsEnum) return Enum.Parse(type, raw, true);
 
+            if (type == typeof(Vector2))
+            {
+                string[] p = raw.Replace("(", "").Replace(")", "").Split(',');
+                if (p.Length != 2) throw new FormatException("Vector2 must be x,y");
+                return new Vector2(
+                    float.Parse(p[0], CultureInfo.InvariantCulture),
+                    float.Parse(p[1], CultureInfo.InvariantCulture));
+            }
+
             if (type == typeof(Vector3))
             {
                 string[] p = raw.Replace("(", "").Replace(")", "").Split(',');
@@ -701,6 +781,14 @@ namespace C3NGAV3R.PrimatePanicAI
                     float.Parse(p[0], CultureInfo.InvariantCulture),
                     float.Parse(p[1], CultureInfo.InvariantCulture),
                     float.Parse(p[2], CultureInfo.InvariantCulture));
+            }
+
+            if (type == typeof(Color))
+            {
+                Color c;
+                if (!ColorUtility.TryParseHtmlString(raw, out c))
+                    throw new FormatException("Color must be HTML hex, e.g. #FFFFFF");
+                return c;
             }
 
             if (typeof(UnityEngine.Object).IsAssignableFrom(type))
@@ -772,31 +860,40 @@ namespace C3NGAV3R.PrimatePanicAI
         private static void RequireTarget(GameObject target)
         {
             if (target == null)
-                throw new InvalidOperationException("No target GameObject was found. Select the object or provide targetPath.");
+                throw new InvalidOperationException("No target GameObject was found. This action needs a specific targetPath. Creation requests should use create_gameobject first.");
         }
 
         private static string BuildAgentSystemPrompt()
         {
             return
-                "You are an action-taking Unity Editor agent for a Gorilla-style VR game. " +
-                "Do not give generic troubleshooting when a concrete action can be taken. Inspect supplied selected-object data and script source, then return ONLY valid JSON. " +
-                "Schema: {\"message\":\"short result\",\"actions\":[{\"type\":\"...\",\"targetPath\":\"SELECTED or hierarchy path\",\"path\":\"Assets/...\",\"content\":\"full file content\",\"componentType\":\"TypeName\",\"field\":\"fieldName\",\"value\":\"value or referenced GameObject path/name\",\"boolValue\":true,\"x\":0,\"y\":0,\"z\":0}]} . " +
-                "Supported action types: create_or_replace_file, add_component, remove_component, set_active, set_local_position, set_local_rotation, set_local_scale, set_component_field. " +
+                "You are an action-taking Unity Editor agent for a Gorilla-style VR game. Return ONLY valid JSON. " +
+                "Your job is to DO the user's request, not ask them to manually build ordinary Unity objects. " +
+                "CRITICAL CREATION RULE: A missing selection is NOT a reason to stop when the request asks to create/make/add/build a NEW feature. For new menus, loading screens, managers, portals, buttons, UI, systems, environment pieces, audio managers, spawners, etc., create a root GameObject and all useful child GameObjects automatically. " +
+                "Only return actions:[] for a missing selection when the user clearly asks to modify/fix a specific existing object and you cannot identify it. " +
+                "If an unrelated GameObject happens to be selected but the user asks for a new standalone system, DO NOT attach the new system to that unrelated selection. Create a new root. " +
+                "Schema: {\"message\":\"short result\",\"actions\":[{" +
+                "\"type\":\"create_gameobject|create_or_replace_file|add_component|remove_component|set_active|set_local_position|set_local_rotation|set_local_scale|set_component_field\"," +
+                "\"targetPath\":\"SELECTED or object name/hierarchy path\",\"name\":\"new object name\",\"parentPath\":\"parent name/path or ROOT\",\"primitive\":\"optional Cube/Sphere/Capsule/Cylinder/Plane/Quad\"," +
+                "\"path\":\"Assets/...\",\"content\":\"full file content\",\"componentType\":\"TypeName (or RectTransform on create_gameobject)\",\"field\":\"fieldName\",\"value\":\"value/reference; for create_gameobject use false only if object must start inactive\",\"boolValue\":true,\"x\":0,\"y\":0,\"z\":0}]} . " +
+                "CREATE_GAMEOBJECT RULES: use create_gameobject whenever a needed object does not already exist. Actions are applied in order, so later actions can target a GameObject created earlier by its name. Use componentType=RectTransform when creating UI objects that should start with a RectTransform. " +
+                "For a loading screen/menu, normally create a dedicated root/Canvas hierarchy instead of demanding a selection. Add built-in components such as Canvas, CanvasScaler, GraphicRaycaster when available. " +
                 "For an existing broken script, replace that exact Script path with a COMPLETE compiling C# file. Never use ellipses or partial code. " +
-                "Do not add a second Rigidbody when one already exists. Preserve Gorilla locomotion unless the user explicitly requests otherwise. " +
+                "If creating a brand-new custom MonoBehaviour, create the file. Do not try to attach that new custom class until Unity has compiled it; built-in components can be added in the same plan. " +
+                "Do not add a second Rigidbody when one already exists. Preserve Gorilla locomotion unless explicitly asked otherwise. " +
                 "For UnityEngine.Object references, set_component_field.value must be the target GameObject name or hierarchy path. " +
-                "If creating a brand-new MonoBehaviour script, create the file now but do not add the component in the same plan because Unity must compile first. " +
                 "Never request shell commands, PowerShell, executables, registry changes, files outside Assets, or arbitrary project deletion. " +
-                "If there is not enough evidence to safely edit something, return actions:[] and state the ONE specific missing selection/reference in message.";
+                "Prefer concrete actions over explanation. message should be short.";
         }
 
         private static string DescribeAction(AgentAction a)
         {
             if (a == null) return "null action";
-            return (a.type ?? "unknown") +
-                   (string.IsNullOrEmpty(a.path) ? "" : " " + a.path) +
-                   (string.IsNullOrEmpty(a.componentType) ? "" : " " + a.componentType) +
-                   (string.IsNullOrEmpty(a.field) ? "" : "." + a.field);
+            string description = a.type ?? "unknown";
+            if (!string.IsNullOrEmpty(a.name)) description += " " + a.name;
+            if (!string.IsNullOrEmpty(a.path)) description += " " + a.path;
+            if (!string.IsNullOrEmpty(a.componentType)) description += " " + a.componentType;
+            if (!string.IsNullOrEmpty(a.field)) description += "." + a.field;
+            return description;
         }
 
         private void PickImage()
@@ -877,10 +974,10 @@ namespace C3NGAV3R.PrimatePanicAI
             return
                 "You are a Unity 3D reconstruction agent. Analyze the attached reference image and return ONLY valid JSON. " +
                 "Create a recognizable 3D BLOCKOUT from Unity primitives. Ignore editor UI, scene gizmos, red/blue rig handles, bone lines, transform arrows, grids, cameras and lights unless explicitly requested. " +
-                "Focus on the actual visible object. Use meters and keep the complete reconstruction roughly 1 to 2.5 meters tall. " +
-                "Prefer 8-35 meaningful parts; maximum 60. Use symmetry when appropriate. Available primitives: Cube, Sphere, Capsule, Cylinder, Plane, Quad. " +
+                "Focus on the actual visible object. Use meters and keep the reconstruction roughly 1 to 2.5 meters tall. " +
+                "Prefer 8-35 meaningful parts; maximum 60. Available primitives: Cube, Sphere, Capsule, Cylinder, Plane, Quad. " +
                 "Each object needs a unique id. parentId may be empty or the id of an earlier object. position/rotation/scale are LOCAL to the parent. " +
-                "Use hexadecimal colors like #3A3A3A. Unless collision is visually/functionally important, keepCollider=false. " +
+                "Use hexadecimal colors like #3A3A3A. Unless collision is important, keepCollider=false. " +
                 "JSON schema: {\"message\":\"short summary\",\"rootName\":\"AI_Recreation\",\"objects\":[{" +
                 "\"id\":\"part1\",\"parentId\":\"\",\"name\":\"Body\",\"primitive\":\"Capsule\",\"position\":{\"x\":0,\"y\":1,\"z\":0}," +
                 "\"rotation\":{\"x\":0,\"y\":0,\"z\":0},\"scale\":{\"x\":1,\"y\":1,\"z\":1},\"color\":\"#808080\",\"keepCollider\":false}]}. " +
@@ -1213,6 +1310,9 @@ namespace C3NGAV3R.PrimatePanicAI
         {
             public string type;
             public string targetPath;
+            public string name;
+            public string parentPath;
+            public string primitive;
             public string path;
             public string content;
             public string componentType;
