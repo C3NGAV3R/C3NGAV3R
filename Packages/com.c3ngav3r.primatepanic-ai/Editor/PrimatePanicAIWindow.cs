@@ -12,1346 +12,771 @@ using UnityEngine.Networking;
 namespace C3NGAV3R.PrimatePanicAI
 {
     [InitializeOnLoad]
-    internal static class PrimatePanicAIRecentLogs
+    internal static class RecentConsoleErrors
     {
         private static readonly List<string> Entries = new List<string>();
-        private const int MaxEntries = 30;
-
-        static PrimatePanicAIRecentLogs()
+        static RecentConsoleErrors()
         {
             Application.logMessageReceived -= OnLog;
             Application.logMessageReceived += OnLog;
         }
 
-        private static void OnLog(string condition, string stackTrace, LogType type)
+        private static void OnLog(string condition, string stack, LogType type)
         {
-            if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert)
-                return;
-
-            string text = type + ": " + condition;
-            if (!string.IsNullOrEmpty(stackTrace))
+            if (type != LogType.Error && type != LogType.Exception && type != LogType.Assert) return;
+            string value = type + ": " + condition;
+            if (!string.IsNullOrEmpty(stack))
             {
-                string[] lines = stackTrace.Split('\n');
-                if (lines.Length > 0 && !string.IsNullOrWhiteSpace(lines[0]))
-                    text += "\n" + lines[0].Trim();
+                string[] lines = stack.Split('\n');
+                if (lines.Length > 0) value += "\n" + lines[0];
             }
-
-            if (text.Length > 1400)
-                text = text.Substring(0, 1400) + " ...";
-
-            Entries.Add(text);
-            while (Entries.Count > MaxEntries)
-                Entries.RemoveAt(0);
+            if (value.Length > 1200) value = value.Substring(0, 1200) + " ...";
+            Entries.Add(value);
+            while (Entries.Count > 24) Entries.RemoveAt(0);
         }
 
-        public static string GetRecent(int maxCount)
+        public static string Get(int count)
         {
-            if (Entries.Count == 0)
-                return "No recent Unity Console errors captured since the last script reload.";
-
-            int start = Mathf.Max(0, Entries.Count - Mathf.Max(1, maxCount));
+            if (Entries.Count == 0) return "No recent Console errors captured.";
             StringBuilder sb = new StringBuilder();
-            for (int i = start; i < Entries.Count; i++)
-            {
-                sb.AppendLine("---");
-                sb.AppendLine(Entries[i]);
-            }
+            int start = Mathf.Max(0, Entries.Count - Mathf.Max(1, count));
+            for (int i = start; i < Entries.Count; i++) sb.AppendLine("---\n" + Entries[i]);
             return sb.ToString();
         }
     }
 
     public class PrimatePanicAIWindow : EditorWindow
     {
-        private enum WorkspaceMode
-        {
-            Agent = 0,
-            Plan = 1,
-            PictureTo3D = 2
-        }
+        private enum Mode { Agent, Plan, PictureTo3D }
 
-        private const string ModePref = "PrimatePanicAI.Mode";
+        private const string EndpointPref = "PrimatePanicAI.Endpoint";
         private const string TextModelPref = "PrimatePanicAI.TextModel";
         private const string VisionModelPref = "PrimatePanicAI.VisionModel";
-        private const string EndpointPref = "PrimatePanicAI.OllamaEndpoint";
-        private const string FastModePref = "PrimatePanicAI.FastMode";
-        private const string IncludeConsolePref = "PrimatePanicAI.IncludeConsole";
-        private const string PictureAutoPref = "PrimatePanicAI.PictureAutoApply";
+        private const string ModePref = "PrimatePanicAI.Mode";
+        private const string FastPref = "PrimatePanicAI.Fast";
+        private const string ErrorsPref = "PrimatePanicAI.Errors";
 
-        private WorkspaceMode mode = WorkspaceMode.Agent;
+        private string endpoint = "http://127.0.0.1:11434/api/generate";
         private string textModel = "qwen2.5-coder:7b";
         private string visionModel = "qwen2.5vl:3b";
-        private string endpoint = "http://127.0.0.1:11434/api/generate";
+        private Mode mode;
         private bool fastMode = true;
-        private bool includeConsoleErrors = true;
-        private bool pictureAutoCreate = true;
-
-        private string textPrompt = "";
-        private string picturePrompt = "Recreate the main object in this reference image as a clean 3D Unity blockout. Ignore Unity editor gizmos, rig/bone lines, transform handles, grids and UI. Match visible proportions, major shapes and colors as closely as possible.";
-        private string resultText = "";
-        private Vector2 scroll;
+        private bool includeErrors = true;
         private bool waiting;
+        private string prompt = "";
+        private string result = "";
+        private Vector2 scroll;
+        private AgentPlan lastPlan;
 
         private string imagePath = "";
         private Texture2D preview;
-
-        private AgentPlan lastAgentPlan;
-        private RecreationPlan lastRecreationPlan;
+        private string picturePrompt = "Recreate the main visible object as a clean 3D Unity blockout. Ignore editor gizmos, bones, handles and UI.";
 
         [MenuItem("Tools/Primate Panic AI")]
-        public static void Open()
-        {
-            GetWindow<PrimatePanicAIWindow>("Primate Panic AI");
-        }
+        public static void Open() => GetWindow<PrimatePanicAIWindow>("Primate Panic AI");
 
         private void OnEnable()
         {
-            mode = (WorkspaceMode)Mathf.Clamp(EditorPrefs.GetInt(ModePref, 0), 0, 2);
-            textModel = EditorPrefs.GetString(TextModelPref, "qwen2.5-coder:7b");
-            visionModel = EditorPrefs.GetString(VisionModelPref, "qwen2.5vl:3b");
-            endpoint = EditorPrefs.GetString(EndpointPref, "http://127.0.0.1:11434/api/generate");
-            fastMode = EditorPrefs.GetBool(FastModePref, true);
-            includeConsoleErrors = EditorPrefs.GetBool(IncludeConsolePref, true);
-            pictureAutoCreate = EditorPrefs.GetBool(PictureAutoPref, true);
+            endpoint = EditorPrefs.GetString(EndpointPref, endpoint);
+            textModel = EditorPrefs.GetString(TextModelPref, textModel);
+            visionModel = EditorPrefs.GetString(VisionModelPref, visionModel);
+            mode = (Mode)Mathf.Clamp(EditorPrefs.GetInt(ModePref, 0), 0, 2);
+            fastMode = EditorPrefs.GetBool(FastPref, true);
+            includeErrors = EditorPrefs.GetBool(ErrorsPref, true);
         }
 
         private void OnDisable()
         {
-            if (preview != null)
-                DestroyImmediate(preview);
+            if (preview != null) DestroyImmediate(preview);
         }
 
         private void OnGUI()
         {
             EditorGUILayout.Space(7);
-            EditorGUILayout.LabelField("Primate Panic AI - LOCAL v0.6", EditorStyles.boldLabel);
-
-            int newMode = GUILayout.Toolbar((int)mode, new[] { "AGENT", "PLAN", "PICTURE → 3D" }, GUILayout.Height(30));
-            if (newMode != (int)mode)
+            EditorGUILayout.LabelField("Primate Panic AI - LOCAL v0.7", EditorStyles.boldLabel);
+            int m = GUILayout.Toolbar((int)mode, new[] { "AGENT", "PLAN", "PICTURE → 3D" }, GUILayout.Height(30));
+            if (m != (int)mode)
             {
-                mode = (WorkspaceMode)newMode;
-                EditorPrefs.SetInt(ModePref, newMode);
-                resultText = "Switched to " + GetModeName(mode) + ".";
+                mode = (Mode)m;
+                EditorPrefs.SetInt(ModePref, m);
+                result = "Switched mode.";
             }
 
-            EditorGUILayout.Space(6);
-            EditorGUI.BeginChangeCheck();
             endpoint = EditorGUILayout.TextField("Ollama URL", endpoint);
-            if (EditorGUI.EndChangeCheck())
-                EditorPrefs.SetString(EndpointPref, endpoint);
+            EditorPrefs.SetString(EndpointPref, endpoint);
 
-            if (mode == WorkspaceMode.PictureTo3D)
-                DrawPictureMode();
-            else
-                DrawTextMode(mode == WorkspaceMode.Plan);
+            if (mode == Mode.PictureTo3D) DrawPictureMode();
+            else DrawAgentMode(mode == Mode.Plan);
 
-            DrawResult();
+            EditorGUILayout.Space(8);
+            EditorGUILayout.LabelField("Result", EditorStyles.boldLabel);
+            scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.MinHeight(180));
+            EditorGUILayout.TextArea(result, GUILayout.ExpandHeight(true));
+            EditorGUILayout.EndScrollView();
         }
 
-        private static string GetModeName(WorkspaceMode value)
-        {
-            if (value == WorkspaceMode.Agent) return "Agent Mode";
-            if (value == WorkspaceMode.Plan) return "Plan Mode";
-            return "Picture → 3D Mode";
-        }
-
-        private void DrawTextMode(bool planOnly)
+        private void DrawAgentMode(bool planOnly)
         {
             EditorGUILayout.HelpBox(
                 planOnly
-                    ? "PLAN MODE: AI inspects automatically and builds a plan. Nothing changes until you press APPLY LAST PLAN. Creation requests do NOT require a selection."
-                    : "AGENT MODE: AI can fix selected objects OR create brand-new systems from nothing. If no selection is needed, it creates its own root GameObject and continues automatically.",
-                planOnly ? MessageType.Info : MessageType.Warning
-            );
+                    ? "PLAN MODE: creates a structured plan only. Nothing changes until APPLY LAST PLAN."
+                    : "AGENT MODE: can create real Unity UI, components, scripts and GameObjects directly. UI requests use dedicated UI actions instead of empty GameObjects.",
+                planOnly ? MessageType.Info : MessageType.Warning);
 
-            EditorGUI.BeginChangeCheck();
             textModel = EditorGUILayout.TextField("Coding Model", textModel);
-            fastMode = EditorGUILayout.ToggleLeft("Fast Mode (recommended)", fastMode);
-            includeConsoleErrors = EditorGUILayout.ToggleLeft("Include recent Console errors", includeConsoleErrors);
-            if (EditorGUI.EndChangeCheck())
-            {
-                EditorPrefs.SetString(TextModelPref, textModel);
-                EditorPrefs.SetBool(FastModePref, fastMode);
-                EditorPrefs.SetBool(IncludeConsolePref, includeConsoleErrors);
-            }
+            fastMode = EditorGUILayout.ToggleLeft("Fast Mode", fastMode);
+            includeErrors = EditorGUILayout.ToggleLeft("Include recent Console errors", includeErrors);
+            EditorPrefs.SetString(TextModelPref, textModel);
+            EditorPrefs.SetBool(FastPref, fastMode);
+            EditorPrefs.SetBool(ErrorsPref, includeErrors);
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                if (GUILayout.Button("Use Fast 3B", GUILayout.Height(24)))
-                {
-                    textModel = "qwen2.5-coder:3b";
-                    EditorPrefs.SetString(TextModelPref, textModel);
-                    resultText = "Selected qwen2.5-coder:3b. If needed run once in CMD: ollama run qwen2.5-coder:3b";
-                }
-
-                if (GUILayout.Button("Use Better 7B", GUILayout.Height(24)))
-                {
-                    textModel = "qwen2.5-coder:7b";
-                    EditorPrefs.SetString(TextModelPref, textModel);
-                }
+                if (GUILayout.Button("Use Fast 3B")) { textModel = "qwen2.5-coder:3b"; EditorPrefs.SetString(TextModelPref, textModel); }
+                if (GUILayout.Button("Use Better 7B")) { textModel = "qwen2.5-coder:7b"; EditorPrefs.SetString(TextModelPref, textModel); }
+                if (GUILayout.Button("Test")) SendSimple("Reply exactly: CODING MODEL CONNECTED");
             }
 
             GameObject selected = Selection.activeGameObject;
-            EditorGUILayout.Space(4);
-            EditorGUILayout.LabelField("Auto inspection", EditorStyles.boldLabel);
-            EditorGUILayout.HelpBox(
-                selected != null
-                    ? "Selected: " + GetHierarchyPath(selected.transform) + "\nAgent/Plan reads it automatically. If your request is unrelated to this object, the AI may create a new root instead."
-                    : "Nothing selected. That's OK. Creation requests like menus, loading screens, managers, systems, portals, buttons and new setups will create new GameObjects automatically.",
-                MessageType.None
-            );
+            EditorGUILayout.HelpBox(selected == null
+                ? "Nothing selected. That's fine for CREATE requests; the Agent will create its own roots."
+                : "Auto-inspection: " + GetHierarchyPath(selected.transform), MessageType.None);
 
-            using (new EditorGUILayout.HorizontalScope())
-            {
-                GUI.enabled = !waiting;
-                if (GUILayout.Button("Test Coding Model", GUILayout.Height(27)))
-                    SendTextTest();
-
-                if (GUILayout.Button("Clear", GUILayout.Height(27)))
-                {
-                    textPrompt = "";
-                    resultText = "";
-                    lastAgentPlan = null;
-                }
-                GUI.enabled = true;
-            }
-
-            EditorGUILayout.Space(5);
             EditorGUILayout.LabelField(planOnly ? "What should it plan?" : "What should it do?", EditorStyles.boldLabel);
-            textPrompt = EditorGUILayout.TextArea(textPrompt, GUILayout.MinHeight(105));
+            prompt = EditorGUILayout.TextArea(prompt, GUILayout.MinHeight(110));
 
-            GUI.enabled = !waiting && !string.IsNullOrWhiteSpace(textPrompt) && !string.IsNullOrWhiteSpace(textModel);
+            GUI.enabled = !waiting && !string.IsNullOrWhiteSpace(prompt);
             if (GUILayout.Button(waiting ? "WORKING..." : planOnly ? "MAKE PLAN" : "RUN AGENT", GUILayout.Height(38)))
-                SendAgentRequest(!planOnly);
+                SendAgent(!planOnly);
             GUI.enabled = true;
 
-            if (planOnly && lastAgentPlan != null && lastAgentPlan.actions != null && lastAgentPlan.actions.Length > 0)
+            if (planOnly && lastPlan != null && lastPlan.actions != null && lastPlan.actions.Length > 0)
             {
-                EditorGUILayout.Space(4);
                 if (GUILayout.Button("APPLY LAST PLAN", GUILayout.Height(31)))
                 {
-                    resultText += "\n\n" + ApplyAgentPlan(lastAgentPlan);
-                    lastAgentPlan = null;
+                    result += "\n\n" + ApplyPlan(lastPlan);
+                    lastPlan = null;
                 }
             }
         }
 
         private void DrawPictureMode()
         {
-            EditorGUILayout.HelpBox(
-                "PICTURE → 3D MODE: choose a reference image. The local vision model analyzes the visible object and builds a bounded 3D Unity blockout from primitives.",
-                MessageType.Info
-            );
-
-            EditorGUI.BeginChangeCheck();
+            EditorGUILayout.HelpBox("Choose a reference image and let the local vision model build a primitive 3D blockout.", MessageType.Info);
             visionModel = EditorGUILayout.TextField("Vision Model", visionModel);
-            pictureAutoCreate = EditorGUILayout.ToggleLeft("Create recreation automatically", pictureAutoCreate);
-            if (EditorGUI.EndChangeCheck())
-            {
-                EditorPrefs.SetString(VisionModelPref, visionModel);
-                EditorPrefs.SetBool(PictureAutoPref, pictureAutoCreate);
-            }
+            EditorPrefs.SetString(VisionModelPref, visionModel);
 
             using (new EditorGUILayout.HorizontalScope())
             {
-                GUI.enabled = !waiting;
-                if (GUILayout.Button("Test Vision Model", GUILayout.Height(27)))
-                    SendVisionTest();
-                if (GUILayout.Button("Pick Picture", GUILayout.Height(27)))
-                    PickImage();
-                if (GUILayout.Button("Clear Picture", GUILayout.Height(27)))
-                    ClearImage();
-                GUI.enabled = true;
+                if (GUILayout.Button("Test Vision")) SendVisionTest();
+                if (GUILayout.Button("Pick Picture")) PickPicture();
+                if (GUILayout.Button("Clear")) ClearPicture();
             }
 
-            if (!string.IsNullOrEmpty(imagePath))
+            if (preview != null)
             {
-                EditorGUILayout.Space(5);
-                EditorGUILayout.LabelField("Reference: " + Path.GetFileName(imagePath));
-                if (preview != null)
-                {
-                    float maxWidth = Mathf.Max(160f, position.width - 28f);
-                    float aspect = preview.height > 0 ? (float)preview.width / preview.height : 1f;
-                    float width = Mathf.Min(maxWidth, 440f);
-                    float height = Mathf.Clamp(width / Mathf.Max(0.01f, aspect), 110f, 300f);
-                    Rect r = GUILayoutUtility.GetRect(width, height, GUILayout.ExpandWidth(false));
-                    EditorGUI.DrawPreviewTexture(r, preview, null, ScaleMode.ScaleToFit);
-                }
+                float w = Mathf.Min(position.width - 28f, 440f);
+                float h = Mathf.Clamp(w / Mathf.Max(.01f, (float)preview.width / preview.height), 110f, 300f);
+                Rect r = GUILayoutUtility.GetRect(w, h, GUILayout.ExpandWidth(false));
+                EditorGUI.DrawPreviewTexture(r, preview, null, ScaleMode.ScaleToFit);
             }
-            else
-            {
-                EditorGUILayout.HelpBox("No reference picture selected.", MessageType.Warning);
-            }
+            else EditorGUILayout.HelpBox("No picture selected.", MessageType.Warning);
 
-            EditorGUILayout.Space(5);
-            EditorGUILayout.LabelField("What should it recreate?", EditorStyles.boldLabel);
-            picturePrompt = EditorGUILayout.TextArea(picturePrompt, GUILayout.MinHeight(88));
-
-            GUI.enabled = !waiting && preview != null && !string.IsNullOrWhiteSpace(picturePrompt) && !string.IsNullOrWhiteSpace(visionModel);
-            if (GUILayout.Button(waiting ? "VISION AI IS BUILDING..." : "RECREATE PICTURE IN UNITY", GUILayout.Height(38)))
-                SendRecreationRequest();
+            picturePrompt = EditorGUILayout.TextArea(picturePrompt, GUILayout.MinHeight(85));
+            GUI.enabled = !waiting && preview != null;
+            if (GUILayout.Button(waiting ? "BUILDING..." : "RECREATE PICTURE IN UNITY", GUILayout.Height(38))) SendPicture();
             GUI.enabled = true;
-
-            if (!pictureAutoCreate && lastRecreationPlan != null)
-            {
-                if (GUILayout.Button("CREATE LAST PICTURE PLAN IN SCENE", GUILayout.Height(31)))
-                {
-                    resultText += "\n\n" + ApplyRecreationPlan(lastRecreationPlan);
-                    lastRecreationPlan = null;
-                }
-            }
         }
 
-        private void DrawResult()
+        private void SendSimple(string text)
         {
-            EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Result", EditorStyles.boldLabel);
-            scroll = EditorGUILayout.BeginScrollView(scroll, GUILayout.MinHeight(180));
-            EditorGUILayout.TextArea(resultText, GUILayout.ExpandHeight(true));
-            EditorGUILayout.EndScrollView();
-        }
-
-        private void SendTextTest()
-        {
-            OllamaRequest req = new OllamaRequest
+            OllamaRequest request = new OllamaRequest
             {
-                model = textModel.Trim(),
-                prompt = "Reply with exactly: CODING MODEL CONNECTED",
-                stream = false,
-                keep_alive = "15m",
-                options = new OllamaOptions { num_ctx = 2048, num_predict = 32, temperature = 0f }
+                model = textModel.Trim(), prompt = text, stream = false, keep_alive = "15m",
+                options = new OllamaOptions { num_ctx = 2048, num_predict = 40, temperature = 0f }
             };
-
-            SendOllama(JsonUtility.ToJson(req), "Testing coding model...", 300, text =>
-            {
-                resultText = text.Contains("CODING MODEL CONNECTED") ? "CODING MODEL CONNECTED ✅" : "CODING MODEL REPLIED:\n" + text;
-            });
+            Send(JsonUtility.ToJson(request), 300, t => result = t);
         }
 
-        private void SendVisionTest()
+        private void SendAgent(bool apply)
         {
-            OllamaVisionRequest req = new OllamaVisionRequest
+            string context = BuildContext();
+            OllamaAgentRequest request = new OllamaAgentRequest
             {
-                model = visionModel.Trim(),
-                prompt = "Reply with exactly: VISION MODEL CONNECTED",
-                stream = false,
-                format = "",
-                images = null,
-                keep_alive = "15m",
-                options = new OllamaOptions { num_ctx = 2048, num_predict = 32, temperature = 0f }
+                model = textModel.Trim(), system = BuildSystemPrompt(), prompt = context,
+                stream = false, format = "json", keep_alive = "15m",
+                options = new OllamaOptions { num_ctx = fastMode ? 5000 : 9000, num_predict = fastMode ? 3800 : 6500, temperature = .03f }
             };
-
-            SendOllama(JsonUtility.ToJson(req), "Testing vision model...", 300, text =>
-            {
-                resultText = text.Contains("VISION MODEL CONNECTED") ? "VISION MODEL CONNECTED ✅" : "VISION MODEL REPLIED:\n" + text;
-            });
+            Send(JsonUtility.ToJson(request), 360, text => HandleAgent(text, apply));
         }
 
-        private void SendAgentRequest(bool applyImmediately)
-        {
-            string context = BuildUserRequestWithContext(true);
-            OllamaAgentRequest req = new OllamaAgentRequest
-            {
-                model = textModel.Trim(),
-                system = BuildAgentSystemPrompt(),
-                prompt = context,
-                stream = false,
-                format = "json",
-                keep_alive = "15m",
-                options = new OllamaOptions
-                {
-                    temperature = 0.05f,
-                    num_ctx = fastMode ? 4096 : 8192,
-                    num_predict = fastMode ? 3200 : 5600
-                }
-            };
-
-            SendOllama(
-                JsonUtility.ToJson(req),
-                applyImmediately ? "Agent is building/fixing it now..." : "AI is building a safe plan...",
-                300,
-                text => HandleAgentResponse(text, applyImmediately)
-            );
-        }
-
-        private string BuildUserRequestWithContext(bool includeScriptSource)
+        private string BuildContext()
         {
             StringBuilder sb = new StringBuilder();
-            sb.AppendLine("USER REQUEST:");
-            sb.AppendLine(textPrompt.Trim());
-            sb.AppendLine();
-            sb.AppendLine(BuildSelectedObjectContext(includeScriptSource));
-
-            if (includeConsoleErrors)
-            {
-                sb.AppendLine();
-                sb.AppendLine("RECENT UNITY CONSOLE ERRORS (IN MEMORY, BOUNDED):");
-                sb.AppendLine(PrimatePanicAIRecentLogs.GetRecent(fastMode ? 6 : 12));
-            }
-
-            return sb.ToString();
-        }
-
-        private string BuildSelectedObjectContext(bool includeScriptSource)
-        {
+            sb.AppendLine("USER REQUEST:\n" + prompt.Trim());
             GameObject go = Selection.activeGameObject;
             if (go == null)
             {
-                return
-                    "SELECTED GAMEOBJECT: NONE\n" +
-                    "IMPORTANT: No selection is NOT a blocker for creation requests. If the user asks to make/create/add a new menu, loading screen, manager, system, portal, button setup, environment object, or other new feature, create a new root GameObject and continue. Only require a selection when the request clearly targets a specific existing object.";
-            }
-
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("SELECTED GAMEOBJECT:");
-            sb.AppendLine("Name: " + go.name);
-            sb.AppendLine("Hierarchy path: " + GetHierarchyPath(go.transform));
-            sb.AppendLine("Active self: " + go.activeSelf);
-            sb.AppendLine("Layer: " + LayerMask.LayerToName(go.layer));
-            sb.AppendLine("Tag: " + go.tag);
-            sb.AppendLine("Local position: " + go.transform.localPosition);
-            sb.AppendLine("Local rotation: " + go.transform.localEulerAngles);
-            sb.AppendLine("Local scale: " + go.transform.localScale);
-            sb.AppendLine("Parent: " + (go.transform.parent != null ? go.transform.parent.name : "NONE"));
-            sb.AppendLine("Components:");
-
-            int scriptCharacters = 0;
-            int maxScriptCharacters = fastMode ? 10000 : 30000;
-            int maxSingleScript = fastMode ? 8000 : 18000;
-
-            foreach (Component c in go.GetComponents<Component>())
-            {
-                if (c == null)
-                {
-                    sb.AppendLine("- MISSING SCRIPT / NULL COMPONENT");
-                    continue;
-                }
-
-                Type componentType = c.GetType();
-                sb.AppendLine("- " + componentType.FullName);
-
-                if (c is Rigidbody rb)
-                    sb.AppendLine("  mass=" + rb.mass + ", gravity=" + rb.useGravity + ", kinematic=" + rb.isKinematic + ", constraints=" + rb.constraints);
-                else if (c is Collider col)
-                    sb.AppendLine("  collider enabled=" + col.enabled + ", trigger=" + col.isTrigger);
-                else if (c is Animator animator)
-                    sb.AppendLine("  animator enabled=" + animator.enabled + ", rootMotion=" + animator.applyRootMotion);
-
-                MonoBehaviour behaviour = c as MonoBehaviour;
-                if (behaviour == null)
-                    continue;
-
-                MonoScript script = MonoScript.FromMonoBehaviour(behaviour);
-                if (script == null)
-                    continue;
-
-                string assetPath = AssetDatabase.GetAssetPath(script);
-                sb.AppendLine("  Script path: " + assetPath);
-
-                if (!includeScriptSource || scriptCharacters >= maxScriptCharacters || string.IsNullOrEmpty(assetPath) || !assetPath.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                string fullPath = AssetPathToFullPath(assetPath);
-                if (string.IsNullOrEmpty(fullPath) || !File.Exists(fullPath))
-                    continue;
-
-                try
-                {
-                    string source = File.ReadAllText(fullPath);
-                    int remaining = maxScriptCharacters - scriptCharacters;
-                    int allowed = Mathf.Min(maxSingleScript, remaining);
-                    if (source.Length > allowed)
-                        source = source.Substring(0, allowed) + "\n// SOURCE TRUNCATED BY FAST AGENT";
-
-                    scriptCharacters += source.Length;
-                    sb.AppendLine("  BEGIN SCRIPT SOURCE");
-                    sb.AppendLine(source);
-                    sb.AppendLine("  END SCRIPT SOURCE");
-                }
-                catch (Exception ex)
-                {
-                    sb.AppendLine("  Could not read script source: " + ex.Message);
-                }
-            }
-
-            return sb.ToString();
-        }
-
-        private void HandleAgentResponse(string modelText, bool applyImmediately)
-        {
-            try
-            {
-                AgentPlan plan = JsonUtility.FromJson<AgentPlan>(ExtractJsonObject(modelText));
-                if (plan == null)
-                {
-                    resultText = "The model did not return a usable agent plan.\n\n" + modelText;
-                    return;
-                }
-
-                lastAgentPlan = plan;
-                StringBuilder sb = new StringBuilder();
-                sb.AppendLine(string.IsNullOrWhiteSpace(plan.message) ? "AI returned a plan." : plan.message);
-                int count = plan.actions != null ? plan.actions.Length : 0;
-                sb.AppendLine("Planned actions: " + count);
-
-                if (applyImmediately && count > 0)
-                {
-                    sb.AppendLine();
-                    sb.AppendLine(ApplyAgentPlan(plan));
-                    lastAgentPlan = null;
-                }
-                else if (count > 0)
-                {
-                    sb.AppendLine();
-                    sb.AppendLine("PLAN MODE: nothing has been changed.");
-                    for (int i = 0; i < plan.actions.Length; i++)
-                        sb.AppendLine((i + 1) + ". " + DescribeAction(plan.actions[i]));
-                }
-                else if (applyImmediately)
-                {
-                    sb.AppendLine();
-                    sb.AppendLine("The model returned zero actions. For a creation request, try wording it as: CREATE this from scratch and make all needed GameObjects automatically.");
-                }
-
-                resultText = sb.ToString();
-            }
-            catch (Exception ex)
-            {
-                resultText = "Could not parse the agent plan: " + ex.Message + "\n\nMODEL RESPONSE:\n" + modelText;
-            }
-        }
-
-        private string ApplyAgentPlan(AgentPlan plan)
-        {
-            if (plan.actions == null || plan.actions.Length == 0)
-                return "No project changes were requested.";
-
-            StringBuilder sb = new StringBuilder();
-            sb.AppendLine("APPLYING AGENT ACTIONS:");
-            bool wroteFiles = false;
-
-            for (int i = 0; i < plan.actions.Length; i++)
-            {
-                AgentAction action = plan.actions[i];
-
-                try
-                {
-                    string result;
-                    string type = (action.type ?? "").Trim().ToLowerInvariant();
-
-                    if (type == "create_gameobject")
-                    {
-                        result = ApplyCreateGameObject(action);
-                    }
-                    else
-                    {
-                        GameObject target = ResolveTarget(action.targetPath) ?? Selection.activeGameObject;
-
-                        switch (type)
-                        {
-                            case "create_or_replace_file":
-                                result = ApplyFileAction(action);
-                                wroteFiles = true;
-                                break;
-                            case "add_component":
-                                result = ApplyAddComponent(target, action);
-                                break;
-                            case "remove_component":
-                                result = ApplyRemoveComponent(target, action);
-                                break;
-                            case "set_active":
-                                result = ApplySetActive(target, action);
-                                break;
-                            case "set_local_position":
-                                result = ApplyTransform(target, action, "position");
-                                break;
-                            case "set_local_rotation":
-                                result = ApplyTransform(target, action, "rotation");
-                                break;
-                            case "set_local_scale":
-                                result = ApplyTransform(target, action, "scale");
-                                break;
-                            case "set_component_field":
-                                result = ApplyComponentField(target, action);
-                                break;
-                            default:
-                                result = "SKIPPED unknown action: " + action.type;
-                                break;
-                        }
-                    }
-
-                    sb.AppendLine("✅ " + result);
-                }
-                catch (Exception ex)
-                {
-                    sb.AppendLine("❌ " + DescribeAction(action) + " -> " + ex.Message);
-                }
-            }
-
-            if (wroteFiles)
-                AssetDatabase.Refresh();
-
-            GameObject selected = Selection.activeGameObject;
-            if (selected != null && selected.scene.IsValid())
-                EditorSceneManager.MarkSceneDirty(selected.scene);
-
-            sb.AppendLine("Done. If Unity recompiles a newly-created script, wait for compilation before asking the agent to attach that new custom script.");
-            return sb.ToString();
-        }
-
-        private static string ApplyCreateGameObject(AgentAction action)
-        {
-            string objectName = SanitizeName(string.IsNullOrWhiteSpace(action.name) ? "AI_CreatedObject" : action.name);
-            GameObject go;
-
-            if (!string.IsNullOrWhiteSpace(action.primitive))
-            {
-                PrimitiveType primitiveType;
-                if (!TryPrimitive(action.primitive, out primitiveType))
-                    throw new InvalidOperationException("Unknown primitive for create_gameobject: " + action.primitive);
-                go = GameObject.CreatePrimitive(primitiveType);
-                go.name = objectName;
-            }
-            else if (string.Equals(action.componentType, "RectTransform", StringComparison.OrdinalIgnoreCase) ||
-                     string.Equals(action.componentType, "UnityEngine.RectTransform", StringComparison.OrdinalIgnoreCase))
-            {
-                go = new GameObject(objectName, typeof(RectTransform));
+                sb.AppendLine("\nSELECTED GAMEOBJECT: NONE");
+                sb.AppendLine("For new creation requests this is NOT a blocker. Create roots/components/UI as needed.");
             }
             else
             {
-                go = new GameObject(objectName);
+                sb.AppendLine("\nSELECTED GAMEOBJECT:");
+                sb.AppendLine("Path: " + GetHierarchyPath(go.transform));
+                sb.AppendLine("Active: " + go.activeSelf);
+                sb.AppendLine("Position: " + go.transform.localPosition);
+                sb.AppendLine("Rotation: " + go.transform.localEulerAngles);
+                sb.AppendLine("Scale: " + go.transform.localScale);
+                sb.AppendLine("Components:");
+                int chars = 0;
+                int maxChars = fastMode ? 9000 : 26000;
+                foreach (Component c in go.GetComponents<Component>())
+                {
+                    if (c == null) { sb.AppendLine("- MISSING SCRIPT"); continue; }
+                    sb.AppendLine("- " + c.GetType().FullName);
+                    MonoBehaviour mb = c as MonoBehaviour;
+                    if (mb == null || chars >= maxChars) continue;
+                    MonoScript ms = MonoScript.FromMonoBehaviour(mb);
+                    if (ms == null) continue;
+                    string asset = AssetDatabase.GetAssetPath(ms);
+                    if (string.IsNullOrEmpty(asset) || !asset.StartsWith("Assets/")) continue;
+                    string full = AssetToFull(asset);
+                    if (!File.Exists(full)) continue;
+                    string src = File.ReadAllText(full);
+                    int take = Mathf.Min(src.Length, maxChars - chars);
+                    sb.AppendLine("SCRIPT " + asset + ":\n" + src.Substring(0, take));
+                    chars += take;
+                }
             }
+            if (includeErrors) sb.AppendLine("\nRECENT CONSOLE ERRORS:\n" + RecentConsoleErrors.Get(fastMode ? 5 : 10));
+            return sb.ToString();
+        }
 
-            Undo.RegisterCreatedObjectUndo(go, "Primate Panic AI create GameObject");
+        private static string BuildSystemPrompt()
+        {
+            return
+                "You are an action-taking Unity Editor agent. Return ONLY valid JSON, never markdown. " +
+                "DO the user's request instead of explaining manual steps when an action can do it. A missing selection is never a blocker for creating a NEW feature. " +
+                "JSON schema: {\"message\":\"short summary\",\"actions\":[{\"type\":\"action\",\"name\":\"name\",\"parentPath\":\"ROOT or parent name/path\",\"targetPath\":\"SELECTED or name/path\",\"uiType\":\"canvas|panel|background|text|title|button|slider|eventsystem\",\"text\":\"visible text\",\"color\":\"#RRGGBB or #RRGGBBAA\",\"components\":[\"TypeName\"],\"componentType\":\"TypeName\",\"field\":\"field\",\"value\":\"value/reference\",\"path\":\"Assets/...\",\"content\":\"complete file content\",\"primitive\":\"Cube/Sphere/Capsule/Cylinder/Plane/Quad\",\"boolValue\":true,\"x\":0,\"y\":0,\"z\":0,\"width\":400,\"height\":80,\"fontSize\":36}]}. " +
+                "SUPPORTED ACTIONS: create_ui, create_gameobject, create_or_replace_file, add_component, remove_component, set_active, set_local_position, set_local_rotation, set_local_scale, set_component_field. " +
+                "CRITICAL UI RULE: NEVER build visible UI as empty create_gameobject placeholders. For Canvas, panels, backgrounds, titles, labels, buttons, sliders, loading text and EventSystem ALWAYS use create_ui. create_ui automatically installs the real Unity UI components. " +
+                "For a main menu/loading screen, create at minimum: create_ui canvas; create_ui background; create_ui title; create_ui button PLAY; create_ui button SETTINGS; create_ui button QUIT; create_ui text Loading; create_ui panel SettingsPanel; create_ui slider Volume; create_ui button BACK; create_ui eventsystem. Parent them correctly. " +
+                "Use width/height and x/y to produce a usable layout. Typical Canvas children: title y=300 width=900 height=120, play y=80 width=420 height=90, settings y=-30, quit y=-140. Background should stretch full screen. " +
+                "create_gameobject is for NON-UI objects. It may include components:[...] and you must include useful built-in components when needed; do not leave meaningless empty objects. " +
+                "For menus also create a COMPLETE runtime C# controller script under Assets/Scripts when behavior is requested. A brand-new custom script cannot be attached until Unity recompiles; create it now and mention one short follow-up run to attach/wire it. " +
+                "For existing broken scripts replace the exact path with a COMPLETE compiling file. Never use ellipses. Do not create duplicate Rigidbodies. Preserve Gorilla locomotion. " +
+                "Only return zero actions when the request explicitly targets an existing object that truly cannot be identified. Prefer complete, concrete plans over generic advice.";
+        }
 
-            if (!string.IsNullOrWhiteSpace(action.parentPath) &&
-                !string.Equals(action.parentPath, "NONE", StringComparison.OrdinalIgnoreCase) &&
-                !string.Equals(action.parentPath, "ROOT", StringComparison.OrdinalIgnoreCase))
+        private void HandleAgent(string text, bool apply)
+        {
+            try
             {
-                GameObject parent = ResolveTarget(action.parentPath);
-                if (parent != null)
-                    go.transform.SetParent(parent.transform, false);
+                AgentPlan plan = JsonUtility.FromJson<AgentPlan>(ExtractJson(text));
+                if (plan == null) { result = "No usable plan.\n" + text; return; }
+                lastPlan = plan;
+                int count = plan.actions == null ? 0 : plan.actions.Length;
+                result = (string.IsNullOrEmpty(plan.message) ? "Plan ready." : plan.message) + "\nPlanned actions: " + count;
+                if (apply && count > 0)
+                {
+                    result += "\n\n" + ApplyPlan(plan);
+                    lastPlan = null;
+                }
+                else if (!apply && count > 0)
+                {
+                    result += "\nPLAN MODE: nothing changed.";
+                    foreach (AgentAction a in plan.actions) result += "\n- " + Describe(a);
+                }
+            }
+            catch (Exception ex) { result = "Agent plan parse failed: " + ex.Message + "\n\n" + text; }
+        }
+
+        private string ApplyPlan(AgentPlan plan)
+        {
+            StringBuilder sb = new StringBuilder("APPLYING:\n");
+            bool files = false;
+            foreach (AgentAction a in plan.actions)
+            {
+                try
+                {
+                    string type = (a.type ?? "").Trim().ToLowerInvariant();
+                    string line;
+                    if (type == "create_ui") line = CreateUI(a);
+                    else if (type == "create_gameobject") line = CreateGameObject(a);
+                    else if (type == "create_or_replace_file") { line = WriteFile(a); files = true; }
+                    else
+                    {
+                        GameObject target = Resolve(a.targetPath) ?? Selection.activeGameObject;
+                        if (type == "add_component") line = AddComponent(target, a.componentType);
+                        else if (type == "remove_component") line = RemoveComponent(target, a.componentType);
+                        else if (type == "set_active") line = SetActive(target, a.boolValue);
+                        else if (type == "set_local_position") line = SetTransform(target, "position", a);
+                        else if (type == "set_local_rotation") line = SetTransform(target, "rotation", a);
+                        else if (type == "set_local_scale") line = SetTransform(target, "scale", a);
+                        else if (type == "set_component_field") line = SetComponentField(target, a);
+                        else line = "Skipped unknown action " + a.type;
+                    }
+                    sb.AppendLine("✅ " + line);
+                }
+                catch (Exception ex) { sb.AppendLine("❌ " + Describe(a) + " -> " + ex.Message); }
+            }
+            if (files) AssetDatabase.Refresh();
+            if (Selection.activeGameObject != null && Selection.activeGameObject.scene.IsValid()) EditorSceneManager.MarkSceneDirty(Selection.activeGameObject.scene);
+            sb.AppendLine("Done. If a new custom C# script was created, let Unity compile before the Agent attaches that custom script on a follow-up run.");
+            return sb.ToString();
+        }
+
+        private static string CreateGameObject(AgentAction a)
+        {
+            string name = CleanName(string.IsNullOrWhiteSpace(a.name) ? "AI_Object" : a.name);
+            GameObject go;
+            if (!string.IsNullOrWhiteSpace(a.primitive))
+            {
+                PrimitiveType pt;
+                if (!TryPrimitive(a.primitive, out pt)) pt = PrimitiveType.Cube;
+                go = GameObject.CreatePrimitive(pt);
+                go.name = name;
+            }
+            else go = new GameObject(name);
+            Undo.RegisterCreatedObjectUndo(go, "AI create GameObject");
+            GameObject parent = Resolve(a.parentPath);
+            if (parent != null) go.transform.SetParent(parent.transform, false);
+            go.transform.localPosition = new Vector3(a.x, a.y, a.z);
+            if (a.components != null)
+            {
+                foreach (string c in a.components)
+                    if (!string.IsNullOrWhiteSpace(c)) TryAddComponent(go, c);
+            }
+            Selection.activeGameObject = go;
+            return "Created " + go.name + (a.components == null ? "" : " with components");
+        }
+
+        private static string CreateUI(AgentAction a)
+        {
+            string kind = (a.uiType ?? "").Trim().ToLowerInvariant();
+            string name = CleanName(string.IsNullOrWhiteSpace(a.name) ? ("AI_" + kind) : a.name);
+            GameObject go;
+
+            if (kind == "eventsystem")
+            {
+                go = new GameObject(name);
+                Undo.RegisterCreatedObjectUndo(go, "AI create EventSystem");
+                TryAddComponent(go, "UnityEngine.EventSystems.EventSystem");
+                if (!TryAddComponent(go, "UnityEngine.InputSystem.UI.InputSystemUIInputModule"))
+                    TryAddComponent(go, "UnityEngine.EventSystems.StandaloneInputModule");
+                Selection.activeGameObject = go;
+                return "Created functional EventSystem";
             }
 
-            go.transform.localPosition = new Vector3(action.x, action.y, action.z);
+            go = new GameObject(name, typeof(RectTransform));
+            Undo.RegisterCreatedObjectUndo(go, "AI create UI");
+            GameObject parent = Resolve(a.parentPath);
+            if (parent != null) go.transform.SetParent(parent.transform, false);
+            RectTransform rt = (RectTransform)go.transform;
+            rt.localScale = Vector3.one;
 
-            bool active = !string.Equals(action.value, "false", StringComparison.OrdinalIgnoreCase);
-            go.SetActive(active);
+            if (kind == "canvas")
+            {
+                Canvas canvas = go.AddComponent<Canvas>();
+                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                Component scaler = AddByName(go, "UnityEngine.UI.CanvasScaler");
+                AddByName(go, "UnityEngine.UI.GraphicRaycaster");
+                if (scaler != null)
+                {
+                    SetEnumMember(scaler, "uiScaleMode", "ScaleWithScreenSize");
+                    SetMember(scaler, "referenceResolution", new Vector2(1920, 1080));
+                    SetMember(scaler, "matchWidthOrHeight", .5f);
+                }
+                Selection.activeGameObject = go;
+                return "Created Canvas + CanvasScaler + GraphicRaycaster";
+            }
+
+            if (kind == "background")
+            {
+                rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+                AddImage(go, string.IsNullOrWhiteSpace(a.color) ? "#101014FF" : a.color);
+            }
+            else if (kind == "panel")
+            {
+                SetRect(rt, a, 760, 500);
+                AddImage(go, string.IsNullOrWhiteSpace(a.color) ? "#17171DEB" : a.color);
+            }
+            else if (kind == "text" || kind == "title")
+            {
+                SetRect(rt, a, kind == "title" ? 900 : 600, kind == "title" ? 120 : 60);
+                AddText(go, string.IsNullOrWhiteSpace(a.text) ? name : a.text, a.fontSize > 0 ? a.fontSize : (kind == "title" ? 64 : 30), a.color);
+            }
+            else if (kind == "button")
+            {
+                SetRect(rt, a, 420, 90);
+                Component image = AddImage(go, string.IsNullOrWhiteSpace(a.color) ? "#292933FF" : a.color);
+                Component button = AddByName(go, "UnityEngine.UI.Button");
+                if (button != null && image != null) SetMember(button, "targetGraphic", image);
+                CreateButtonLabel(go, string.IsNullOrWhiteSpace(a.text) ? name.Replace("Button", "") : a.text, a.fontSize > 0 ? a.fontSize : 34);
+            }
+            else if (kind == "slider")
+            {
+                SetRect(rt, a, 520, 50);
+                BuildSlider(go, a.color);
+            }
+            else throw new InvalidOperationException("Unknown uiType: " + a.uiType);
+
+            if (a.components != null)
+                foreach (string extra in a.components) if (!string.IsNullOrWhiteSpace(extra)) TryAddComponent(go, extra);
 
             Selection.activeGameObject = go;
-            EditorGUIUtility.PingObject(go);
-            if (go.scene.IsValid())
-                EditorSceneManager.MarkSceneDirty(go.scene);
-
-            return "Created GameObject '" + go.name + "'" + (go.transform.parent != null ? " under '" + go.transform.parent.name + "'" : "");
+            return "Created real UI " + kind + " '" + go.name + "' with components";
         }
 
-        private static string ApplyFileAction(AgentAction action)
+        private static void SetRect(RectTransform rt, AgentAction a, float defaultW, float defaultH)
         {
-            if (string.IsNullOrWhiteSpace(action.path))
-                throw new InvalidOperationException("File action has no path.");
+            rt.anchorMin = rt.anchorMax = new Vector2(.5f, .5f);
+            rt.pivot = new Vector2(.5f, .5f);
+            rt.anchoredPosition = new Vector2(a.x, a.y);
+            rt.sizeDelta = new Vector2(a.width > 0 ? a.width : defaultW, a.height > 0 ? a.height : defaultH);
+        }
 
-            string normalized = action.path.Replace('\\', '/').Trim();
-            if (!normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("File writes are restricted to Assets/.");
-            if (!normalized.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) &&
-                !normalized.EndsWith(".json", StringComparison.OrdinalIgnoreCase) &&
-                !normalized.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Only .cs, .json and .txt files may be written.");
+        private static Component AddImage(GameObject go, string color)
+        {
+            Component c = AddByName(go, "UnityEngine.UI.Image");
+            if (c != null) SetMember(c, "color", ParseColor(color, new Color(.15f, .15f, .18f, 1f)));
+            return c;
+        }
 
-            string fullPath = AssetPathToFullPath(normalized);
-            string allowedRoot = Path.GetFullPath(Application.dataPath) + Path.DirectorySeparatorChar;
-            string checkedPath = Path.GetFullPath(fullPath);
-            if (!checkedPath.StartsWith(allowedRoot, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("Blocked path outside Assets/.");
-
-            string directory = Path.GetDirectoryName(checkedPath);
-            if (!Directory.Exists(directory))
-                Directory.CreateDirectory(directory);
-
-            if (File.Exists(checkedPath))
+        private static Component AddText(GameObject go, string text, int size, string color)
+        {
+            Component c = AddByName(go, "UnityEngine.UI.Text");
+            if (c == null) return null;
+            SetMember(c, "text", text);
+            SetMember(c, "fontSize", size);
+            SetEnumMember(c, "alignment", "MiddleCenter");
+            SetMember(c, "color", ParseColor(color, Color.white));
+            try
             {
-                string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-                string backupRoot = Path.Combine(projectRoot, "Library", "PrimatePanicAIBackups");
-                Directory.CreateDirectory(backupRoot);
-                string safeName = normalized.Replace('/', '_').Replace('\\', '_');
-                string backup = Path.Combine(backupRoot, DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + "_" + safeName);
-                File.Copy(checkedPath, backup, true);
+                Font font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
+                if (font != null) SetMember(c, "font", font);
             }
-
-            File.WriteAllText(checkedPath, action.content ?? "", new UTF8Encoding(false));
-            return "Wrote " + normalized;
+            catch { }
+            return c;
         }
 
-        private static string ApplyAddComponent(GameObject target, AgentAction action)
+        private static void CreateButtonLabel(GameObject button, string label, int size)
         {
-            RequireTarget(target);
-            Type type = FindComponentType(action.componentType);
-            if (type == null)
-                throw new InvalidOperationException("Component type not found: " + action.componentType + ". If a custom script was just created, wait for Unity to compile and run Agent once more.");
-            if (target.GetComponent(type) != null)
-                return target.name + " already has " + type.Name;
-            Undo.AddComponent(target, type);
-            return "Added " + type.Name + " to " + target.name;
+            GameObject textGo = new GameObject("Text", typeof(RectTransform));
+            Undo.RegisterCreatedObjectUndo(textGo, "AI button label");
+            textGo.transform.SetParent(button.transform, false);
+            RectTransform rt = (RectTransform)textGo.transform;
+            rt.anchorMin = Vector2.zero; rt.anchorMax = Vector2.one; rt.offsetMin = Vector2.zero; rt.offsetMax = Vector2.zero;
+            AddText(textGo, label, size, "#FFFFFFFF");
         }
 
-        private static string ApplyRemoveComponent(GameObject target, AgentAction action)
+        private static void BuildSlider(GameObject root, string accent)
         {
-            RequireTarget(target);
-            Type type = FindComponentType(action.componentType);
-            if (type == null)
-                throw new InvalidOperationException("Component type not found: " + action.componentType);
-            Component component = target.GetComponent(type);
-            if (component == null)
-                return target.name + " does not have " + type.Name;
-            Undo.DestroyObjectImmediate(component);
-            return "Removed " + type.Name + " from " + target.name;
+            Component slider = AddByName(root, "UnityEngine.UI.Slider");
+            GameObject bg = CreateUiChild(root, "Background");
+            RectTransform bgr = (RectTransform)bg.transform;
+            bgr.anchorMin = new Vector2(0, .25f); bgr.anchorMax = new Vector2(1, .75f); bgr.offsetMin = Vector2.zero; bgr.offsetMax = Vector2.zero;
+            AddImage(bg, "#3A3A42FF");
+
+            GameObject fillArea = CreateUiChild(root, "Fill Area");
+            RectTransform far = (RectTransform)fillArea.transform;
+            far.anchorMin = new Vector2(0, .25f); far.anchorMax = new Vector2(1, .75f); far.offsetMin = new Vector2(8, 0); far.offsetMax = new Vector2(-8, 0);
+            GameObject fill = CreateUiChild(fillArea, "Fill");
+            RectTransform fr = (RectTransform)fill.transform;
+            fr.anchorMin = Vector2.zero; fr.anchorMax = Vector2.one; fr.offsetMin = Vector2.zero; fr.offsetMax = Vector2.zero;
+            AddImage(fill, string.IsNullOrWhiteSpace(accent) ? "#61D7FFFF" : accent);
+
+            GameObject handleArea = CreateUiChild(root, "Handle Slide Area");
+            RectTransform har = (RectTransform)handleArea.transform;
+            har.anchorMin = Vector2.zero; har.anchorMax = Vector2.one; har.offsetMin = new Vector2(10, 0); har.offsetMax = new Vector2(-10, 0);
+            GameObject handle = CreateUiChild(handleArea, "Handle");
+            RectTransform hr = (RectTransform)handle.transform;
+            hr.sizeDelta = new Vector2(28, 42);
+            Component handleImage = AddImage(handle, "#FFFFFFFF");
+
+            if (slider != null)
+            {
+                SetMember(slider, "fillRect", fr);
+                SetMember(slider, "handleRect", hr);
+                if (handleImage != null) SetMember(slider, "targetGraphic", handleImage);
+                SetMember(slider, "minValue", 0f); SetMember(slider, "maxValue", 1f); SetMember(slider, "value", .8f);
+            }
         }
 
-        private static string ApplySetActive(GameObject target, AgentAction action)
+        private static GameObject CreateUiChild(GameObject parent, string name)
         {
-            RequireTarget(target);
-            Undo.RecordObject(target, "Primate Panic AI set active");
-            target.SetActive(action.boolValue);
-            EditorUtility.SetDirty(target);
-            return "Set " + target.name + " active=" + action.boolValue;
+            GameObject go = new GameObject(name, typeof(RectTransform));
+            Undo.RegisterCreatedObjectUndo(go, "AI UI child");
+            go.transform.SetParent(parent.transform, false);
+            return go;
         }
 
-        private static string ApplyTransform(GameObject target, AgentAction action, string kind)
+        private static string AddComponent(GameObject target, string typeName)
         {
-            RequireTarget(target);
-            Undo.RecordObject(target.transform, "Primate Panic AI transform");
-            Vector3 v = new Vector3(action.x, action.y, action.z);
+            Require(target);
+            if (!TryAddComponent(target, typeName)) throw new InvalidOperationException("Component type not found or could not be added: " + typeName);
+            return "Added " + typeName + " to " + target.name;
+        }
+
+        private static string RemoveComponent(GameObject target, string typeName)
+        {
+            Require(target);
+            Type t = FindType(typeName);
+            if (t == null) throw new InvalidOperationException("Type not found: " + typeName);
+            Component c = target.GetComponent(t);
+            if (c == null) return target.name + " did not have " + typeName;
+            Undo.DestroyObjectImmediate(c);
+            return "Removed " + typeName;
+        }
+
+        private static bool TryAddComponent(GameObject go, string typeName)
+        {
+            Type t = FindType(typeName);
+            if (t == null || !typeof(Component).IsAssignableFrom(t)) return false;
+            if (go.GetComponent(t) != null) return true;
+            try { Undo.AddComponent(go, t); return true; } catch { return false; }
+        }
+
+        private static Component AddByName(GameObject go, string typeName)
+        {
+            Type t = FindType(typeName);
+            if (t == null || !typeof(Component).IsAssignableFrom(t)) return null;
+            Component existing = go.GetComponent(t);
+            if (existing != null) return existing;
+            try { return Undo.AddComponent(go, t); } catch { return null; }
+        }
+
+        private static Type FindType(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return null;
+            foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                Type direct = asm.GetType(name, false, true);
+                if (direct != null) return direct;
+                try
+                {
+                    foreach (Type t in asm.GetTypes()) if (string.Equals(t.Name, name, StringComparison.OrdinalIgnoreCase)) return t;
+                }
+                catch (ReflectionTypeLoadException) { }
+            }
+            return null;
+        }
+
+        private static string SetActive(GameObject target, bool value)
+        {
+            Require(target); Undo.RecordObject(target, "AI active"); target.SetActive(value); return "Set active=" + value;
+        }
+
+        private static string SetTransform(GameObject target, string kind, AgentAction a)
+        {
+            Require(target); Undo.RecordObject(target.transform, "AI transform");
+            Vector3 v = new Vector3(a.x, a.y, a.z);
             if (kind == "position") target.transform.localPosition = v;
             else if (kind == "rotation") target.transform.localEulerAngles = v;
             else target.transform.localScale = v;
-            EditorUtility.SetDirty(target.transform);
-            return "Set " + target.name + " local " + kind + " to " + v;
+            return "Set " + kind + " on " + target.name;
         }
 
-        private static string ApplyComponentField(GameObject target, AgentAction action)
+        private static string SetComponentField(GameObject target, AgentAction a)
         {
-            RequireTarget(target);
-            Type type = FindComponentType(action.componentType);
-            if (type == null)
-                throw new InvalidOperationException("Component type not found: " + action.componentType);
-
-            Component component = target.GetComponent(type);
-            if (component == null)
-                throw new InvalidOperationException(target.name + " has no " + type.Name + " component.");
-
-            BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
-            FieldInfo field = type.GetField(action.field ?? "", flags);
-            PropertyInfo property = field == null ? type.GetProperty(action.field ?? "", flags) : null;
-            Type valueType = field != null ? field.FieldType : property != null && property.CanWrite ? property.PropertyType : null;
-            if (valueType == null)
-                throw new InvalidOperationException("Writable field/property not found: " + action.field);
-
-            object converted = ConvertValue(action.value, valueType);
-            Undo.RecordObject(component, "Primate Panic AI set field");
-            if (field != null) field.SetValue(component, converted);
-            else property.SetValue(component, converted, null);
-            EditorUtility.SetDirty(component);
-            return "Set " + type.Name + "." + action.field + " = " + action.value;
+            Require(target);
+            Type type = FindType(a.componentType);
+            if (type == null) throw new InvalidOperationException("Type not found: " + a.componentType);
+            Component comp = target.GetComponent(type);
+            if (comp == null) throw new InvalidOperationException("Component missing: " + a.componentType);
+            MemberInfo member = (MemberInfo)type.GetField(a.field ?? "", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic)
+                                ?? type.GetProperty(a.field ?? "", BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (member == null) throw new InvalidOperationException("Field/property not found: " + a.field);
+            Type vt = member is FieldInfo ? ((FieldInfo)member).FieldType : ((PropertyInfo)member).PropertyType;
+            object value = ConvertValue(a.value, vt);
+            Undo.RecordObject(comp, "AI set field");
+            if (member is FieldInfo) ((FieldInfo)member).SetValue(comp, value); else ((PropertyInfo)member).SetValue(comp, value, null);
+            EditorUtility.SetDirty(comp);
+            return "Set " + a.componentType + "." + a.field;
         }
 
-        private static object ConvertValue(string raw, Type type)
+        private static object ConvertValue(string raw, Type t)
         {
             raw = raw ?? "";
-            if (type == typeof(string)) return raw;
-            if (type == typeof(bool)) return bool.Parse(raw);
-            if (type == typeof(int)) return int.Parse(raw, CultureInfo.InvariantCulture);
-            if (type == typeof(float)) return float.Parse(raw, CultureInfo.InvariantCulture);
-            if (type == typeof(double)) return double.Parse(raw, CultureInfo.InvariantCulture);
-            if (type.IsEnum) return Enum.Parse(type, raw, true);
-
-            if (type == typeof(Vector2))
+            if (t == typeof(string)) return raw;
+            if (t == typeof(bool)) return bool.Parse(raw);
+            if (t == typeof(int)) return int.Parse(raw, CultureInfo.InvariantCulture);
+            if (t == typeof(float)) return float.Parse(raw, CultureInfo.InvariantCulture);
+            if (t == typeof(double)) return double.Parse(raw, CultureInfo.InvariantCulture);
+            if (t == typeof(Vector2)) { string[] p = raw.Trim('(', ')').Split(','); return new Vector2(float.Parse(p[0], CultureInfo.InvariantCulture), float.Parse(p[1], CultureInfo.InvariantCulture)); }
+            if (t == typeof(Vector3)) { string[] p = raw.Trim('(', ')').Split(','); return new Vector3(float.Parse(p[0], CultureInfo.InvariantCulture), float.Parse(p[1], CultureInfo.InvariantCulture), float.Parse(p[2], CultureInfo.InvariantCulture)); }
+            if (t == typeof(Color)) return ParseColor(raw, Color.white);
+            if (t.IsEnum) return Enum.Parse(t, raw, true);
+            if (typeof(UnityEngine.Object).IsAssignableFrom(t))
             {
-                string[] p = raw.Replace("(", "").Replace(")", "").Split(',');
-                if (p.Length != 2) throw new FormatException("Vector2 must be x,y");
-                return new Vector2(
-                    float.Parse(p[0], CultureInfo.InvariantCulture),
-                    float.Parse(p[1], CultureInfo.InvariantCulture));
+                if (string.Equals(raw, "NONE", StringComparison.OrdinalIgnoreCase) || string.Equals(raw, "NULL", StringComparison.OrdinalIgnoreCase)) return null;
+                GameObject go = Resolve(raw); if (go == null) throw new InvalidOperationException("Reference not found: " + raw);
+                if (t == typeof(GameObject)) return go; if (t == typeof(Transform)) return go.transform;
+                return go.GetComponent(t);
             }
-
-            if (type == typeof(Vector3))
-            {
-                string[] p = raw.Replace("(", "").Replace(")", "").Split(',');
-                if (p.Length != 3) throw new FormatException("Vector3 must be x,y,z");
-                return new Vector3(
-                    float.Parse(p[0], CultureInfo.InvariantCulture),
-                    float.Parse(p[1], CultureInfo.InvariantCulture),
-                    float.Parse(p[2], CultureInfo.InvariantCulture));
-            }
-
-            if (type == typeof(Color))
-            {
-                Color c;
-                if (!ColorUtility.TryParseHtmlString(raw, out c))
-                    throw new FormatException("Color must be HTML hex, e.g. #FFFFFF");
-                return c;
-            }
-
-            if (typeof(UnityEngine.Object).IsAssignableFrom(type))
-            {
-                if (string.Equals(raw, "NONE", StringComparison.OrdinalIgnoreCase) || string.Equals(raw, "NULL", StringComparison.OrdinalIgnoreCase))
-                    return null;
-
-                GameObject go = ResolveTarget(raw);
-                if (go == null)
-                    throw new InvalidOperationException("Could not find referenced GameObject: " + raw);
-                if (type == typeof(GameObject)) return go;
-                if (type == typeof(Transform)) return go.transform;
-
-                Component c = go.GetComponent(type);
-                if (c == null)
-                    throw new InvalidOperationException(go.name + " has no " + type.Name + " component for reference assignment.");
-                return c;
-            }
-
-            throw new InvalidOperationException("Unsupported field type: " + type.FullName);
+            throw new InvalidOperationException("Unsupported value type " + t.Name);
         }
 
-        private static GameObject ResolveTarget(string pathOrName)
+        private static void SetMember(object obj, string name, object value)
         {
-            if (string.IsNullOrWhiteSpace(pathOrName) || string.Equals(pathOrName, "SELECTED", StringComparison.OrdinalIgnoreCase))
-                return Selection.activeGameObject;
+            if (obj == null) return;
+            Type t = obj.GetType();
+            FieldInfo f = t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (f != null) { try { f.SetValue(obj, value); } catch { } return; }
+            PropertyInfo p = t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            if (p != null && p.CanWrite) try { p.SetValue(obj, value, null); } catch { }
+        }
 
-            string wanted = pathOrName.Trim().Trim('/');
-            GameObject[] all = Resources.FindObjectsOfTypeAll<GameObject>();
-            foreach (GameObject go in all)
+        private static void SetEnumMember(object obj, string name, string enumName)
+        {
+            if (obj == null) return;
+            Type t = obj.GetType();
+            FieldInfo f = t.GetField(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+            PropertyInfo p = f == null ? t.GetProperty(name, BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic) : null;
+            Type et = f != null ? f.FieldType : p != null ? p.PropertyType : null;
+            if (et == null || !et.IsEnum) return;
+            object v = Enum.Parse(et, enumName, true);
+            if (f != null) f.SetValue(obj, v); else if (p.CanWrite) p.SetValue(obj, v, null);
+        }
+
+        private static Color ParseColor(string hex, Color fallback)
+        {
+            Color c; return !string.IsNullOrWhiteSpace(hex) && ColorUtility.TryParseHtmlString(hex.Trim(), out c) ? c : fallback;
+        }
+
+        private static string WriteFile(AgentAction a)
+        {
+            if (string.IsNullOrWhiteSpace(a.path)) throw new InvalidOperationException("Missing path");
+            string path = a.path.Replace('\\', '/');
+            if (!path.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Writes restricted to Assets/");
+            if (!path.EndsWith(".cs", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".json", StringComparison.OrdinalIgnoreCase) && !path.EndsWith(".txt", StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Unsupported file type");
+            string full = AssetToFull(path);
+            string root = Path.GetFullPath(Application.dataPath) + Path.DirectorySeparatorChar;
+            if (!Path.GetFullPath(full).StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("Blocked path");
+            Directory.CreateDirectory(Path.GetDirectoryName(full));
+            if (File.Exists(full))
             {
-                if (go == null || !go.scene.IsValid())
-                    continue;
+                string project = Directory.GetParent(Application.dataPath).FullName;
+                string backupDir = Path.Combine(project, "Library", "PrimatePanicAIBackups"); Directory.CreateDirectory(backupDir);
+                File.Copy(full, Path.Combine(backupDir, DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + "_" + Path.GetFileName(full)), true);
+            }
+            File.WriteAllText(full, a.content ?? "", new UTF8Encoding(false));
+            return "Wrote " + path;
+        }
 
-                if (string.Equals(GetHierarchyPath(go.transform).Trim('/'), wanted, StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(go.name, wanted, StringComparison.OrdinalIgnoreCase))
-                    return go;
+        private static GameObject Resolve(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path) || string.Equals(path, "ROOT", StringComparison.OrdinalIgnoreCase)) return null;
+            if (string.Equals(path, "SELECTED", StringComparison.OrdinalIgnoreCase)) return Selection.activeGameObject;
+            string wanted = path.Trim().Trim('/');
+            foreach (GameObject go in Resources.FindObjectsOfTypeAll<GameObject>())
+            {
+                if (go == null || !go.scene.IsValid()) continue;
+                if (string.Equals(go.name, wanted, StringComparison.OrdinalIgnoreCase) || string.Equals(GetHierarchyPath(go.transform).Trim('/'), wanted, StringComparison.OrdinalIgnoreCase)) return go;
             }
             return null;
         }
 
-        private static Type FindComponentType(string name)
-        {
-            if (string.IsNullOrWhiteSpace(name))
-                return null;
+        private static void Require(GameObject go) { if (go == null) throw new InvalidOperationException("Target GameObject not found"); }
+        private static string GetHierarchyPath(Transform t) { List<string> parts = new List<string>(); while (t != null) { parts.Add(t.name); t = t.parent; } parts.Reverse(); return string.Join("/", parts.ToArray()); }
+        private static string AssetToFull(string asset) => Path.GetFullPath(Path.Combine(Directory.GetParent(Application.dataPath).FullName, asset.Replace('/', Path.DirectorySeparatorChar)));
+        private static string CleanName(string value) => string.IsNullOrWhiteSpace(value) ? "AI_Object" : value.Replace('/', '_').Replace('\\', '_').Trim();
+        private static string Describe(AgentAction a) => (a.type ?? "unknown") + (string.IsNullOrWhiteSpace(a.uiType) ? "" : " " + a.uiType) + (string.IsNullOrWhiteSpace(a.name) ? "" : " " + a.name);
 
-            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        private static bool TryPrimitive(string value, out PrimitiveType t)
+        {
+            switch ((value ?? "").ToLowerInvariant())
             {
-                Type direct = assembly.GetType(name, false, true);
-                if (direct != null && typeof(Component).IsAssignableFrom(direct))
-                    return direct;
-
-                try
-                {
-                    Type[] types = assembly.GetTypes();
-                    for (int i = 0; i < types.Length; i++)
-                    {
-                        if (typeof(Component).IsAssignableFrom(types[i]) && string.Equals(types[i].Name, name, StringComparison.OrdinalIgnoreCase))
-                            return types[i];
-                    }
-                }
-                catch (ReflectionTypeLoadException)
-                {
-                }
-            }
-            return null;
-        }
-
-        private static void RequireTarget(GameObject target)
-        {
-            if (target == null)
-                throw new InvalidOperationException("No target GameObject was found. This action needs a specific targetPath. Creation requests should use create_gameobject first.");
-        }
-
-        private static string BuildAgentSystemPrompt()
-        {
-            return
-                "You are an action-taking Unity Editor agent for a Gorilla-style VR game. Return ONLY valid JSON. " +
-                "Your job is to DO the user's request, not ask them to manually build ordinary Unity objects. " +
-                "CRITICAL CREATION RULE: A missing selection is NOT a reason to stop when the request asks to create/make/add/build a NEW feature. For new menus, loading screens, managers, portals, buttons, UI, systems, environment pieces, audio managers, spawners, etc., create a root GameObject and all useful child GameObjects automatically. " +
-                "Only return actions:[] for a missing selection when the user clearly asks to modify/fix a specific existing object and you cannot identify it. " +
-                "If an unrelated GameObject happens to be selected but the user asks for a new standalone system, DO NOT attach the new system to that unrelated selection. Create a new root. " +
-                "Schema: {\"message\":\"short result\",\"actions\":[{" +
-                "\"type\":\"create_gameobject|create_or_replace_file|add_component|remove_component|set_active|set_local_position|set_local_rotation|set_local_scale|set_component_field\"," +
-                "\"targetPath\":\"SELECTED or object name/hierarchy path\",\"name\":\"new object name\",\"parentPath\":\"parent name/path or ROOT\",\"primitive\":\"optional Cube/Sphere/Capsule/Cylinder/Plane/Quad\"," +
-                "\"path\":\"Assets/...\",\"content\":\"full file content\",\"componentType\":\"TypeName (or RectTransform on create_gameobject)\",\"field\":\"fieldName\",\"value\":\"value/reference; for create_gameobject use false only if object must start inactive\",\"boolValue\":true,\"x\":0,\"y\":0,\"z\":0}]} . " +
-                "CREATE_GAMEOBJECT RULES: use create_gameobject whenever a needed object does not already exist. Actions are applied in order, so later actions can target a GameObject created earlier by its name. Use componentType=RectTransform when creating UI objects that should start with a RectTransform. " +
-                "For a loading screen/menu, normally create a dedicated root/Canvas hierarchy instead of demanding a selection. Add built-in components such as Canvas, CanvasScaler, GraphicRaycaster when available. " +
-                "For an existing broken script, replace that exact Script path with a COMPLETE compiling C# file. Never use ellipses or partial code. " +
-                "If creating a brand-new custom MonoBehaviour, create the file. Do not try to attach that new custom class until Unity has compiled it; built-in components can be added in the same plan. " +
-                "Do not add a second Rigidbody when one already exists. Preserve Gorilla locomotion unless explicitly asked otherwise. " +
-                "For UnityEngine.Object references, set_component_field.value must be the target GameObject name or hierarchy path. " +
-                "Never request shell commands, PowerShell, executables, registry changes, files outside Assets, or arbitrary project deletion. " +
-                "Prefer concrete actions over explanation. message should be short.";
-        }
-
-        private static string DescribeAction(AgentAction a)
-        {
-            if (a == null) return "null action";
-            string description = a.type ?? "unknown";
-            if (!string.IsNullOrEmpty(a.name)) description += " " + a.name;
-            if (!string.IsNullOrEmpty(a.path)) description += " " + a.path;
-            if (!string.IsNullOrEmpty(a.componentType)) description += " " + a.componentType;
-            if (!string.IsNullOrEmpty(a.field)) description += "." + a.field;
-            return description;
-        }
-
-        private void PickImage()
-        {
-            string path = EditorUtility.OpenFilePanel("Pick reference picture", "", "png,jpg,jpeg");
-            if (string.IsNullOrEmpty(path))
-                return;
-
-            try
-            {
-                byte[] bytes = File.ReadAllBytes(path);
-                Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                if (!tex.LoadImage(bytes))
-                {
-                    DestroyImmediate(tex);
-                    resultText = "Could not load that image.";
-                    return;
-                }
-
-                if (preview != null)
-                    DestroyImmediate(preview);
-
-                preview = tex;
-                imagePath = path;
-                lastRecreationPlan = null;
-                resultText = "Reference picture loaded. Ready to recreate.";
-                Repaint();
-            }
-            catch (Exception ex)
-            {
-                resultText = "Could not open picture: " + ex.Message;
+                case "sphere": t = PrimitiveType.Sphere; return true; case "capsule": t = PrimitiveType.Capsule; return true;
+                case "cylinder": t = PrimitiveType.Cylinder; return true; case "plane": t = PrimitiveType.Plane; return true;
+                case "quad": t = PrimitiveType.Quad; return true; default: t = PrimitiveType.Cube; return value != null && value.ToLowerInvariant() == "cube";
             }
         }
 
-        private void ClearImage()
+        private void PickPicture()
         {
-            imagePath = "";
-            if (preview != null)
-            {
-                DestroyImmediate(preview);
-                preview = null;
-            }
-            lastRecreationPlan = null;
-            resultText = "Picture cleared.";
+            string p = EditorUtility.OpenFilePanel("Pick reference picture", "", "png,jpg,jpeg"); if (string.IsNullOrEmpty(p)) return;
+            byte[] data = File.ReadAllBytes(p); Texture2D tex = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (!tex.LoadImage(data)) { DestroyImmediate(tex); result = "Could not load picture"; return; }
+            if (preview != null) DestroyImmediate(preview); preview = tex; imagePath = p; result = "Picture loaded: " + Path.GetFileName(p);
         }
-
-        private void SendRecreationRequest()
+        private void ClearPicture() { imagePath = ""; if (preview != null) DestroyImmediate(preview); preview = null; }
+        private void SendVisionTest()
+        {
+            OllamaVisionRequest r = new OllamaVisionRequest { model = visionModel, prompt = "Reply exactly: VISION CONNECTED", stream = false, images = null, format = "", keep_alive = "15m", options = new OllamaOptions { num_ctx = 2048, num_predict = 40, temperature = 0 } };
+            Send(JsonUtility.ToJson(r), 300, t => result = t);
+        }
+        private void SendPicture()
+        {
+            string b64 = ImageBase64(preview, 896);
+            OllamaVisionRequest r = new OllamaVisionRequest
+            {
+                model = visionModel, stream = false, format = "json", images = new[] { b64 }, keep_alive = "15m",
+                options = new OllamaOptions { num_ctx = 8192, num_predict = 6000, temperature = .12f },
+                prompt = "Analyze the image and return ONLY JSON. Rebuild the main visible object from Unity primitives. Ignore Unity UI/gizmos/bones. Schema: {\"message\":\"summary\",\"rootName\":\"AI_Recreation\",\"objects\":[{\"id\":\"p1\",\"parentId\":\"\",\"name\":\"Part\",\"primitive\":\"Cube\",\"position\":{\"x\":0,\"y\":1,\"z\":0},\"rotation\":{\"x\":0,\"y\":0,\"z\":0},\"scale\":{\"x\":1,\"y\":1,\"z\":1},\"color\":\"#808080\"}]}. Maximum 60 parts. USER: " + picturePrompt
+            };
+            Send(JsonUtility.ToJson(r), 600, HandlePicture);
+        }
+        private void HandlePicture(string text)
         {
             try
             {
-                string imageBase64 = BuildOptimizedImageBase64(preview, 896);
-                OllamaVisionRequest req = new OllamaVisionRequest
+                RecreationPlan p = JsonUtility.FromJson<RecreationPlan>(ExtractJson(text)); if (p == null || p.objects == null) { result = "No usable 3D plan"; return; }
+                GameObject root = new GameObject(string.IsNullOrWhiteSpace(p.rootName) ? "AI_Recreation" : CleanName(p.rootName)); Undo.RegisterCreatedObjectUndo(root, "AI recreation");
+                Dictionary<string, GameObject> made = new Dictionary<string, GameObject>(); int n = 0;
+                foreach (RecreationObject o in p.objects)
                 {
-                    model = visionModel.Trim(),
-                    prompt = BuildVisionPrompt(picturePrompt),
-                    stream = false,
-                    format = "json",
-                    images = new[] { imageBase64 },
-                    keep_alive = "15m",
-                    options = new OllamaOptions
-                    {
-                        num_ctx = 8192,
-                        num_predict = 6000,
-                        temperature = 0.15f
-                    }
-                };
-
-                SendOllama(JsonUtility.ToJson(req), "Vision model is analyzing the picture...", 600, HandleRecreationResponse);
-            }
-            catch (Exception ex)
-            {
-                resultText = "Could not prepare reference picture: " + ex.Message;
-            }
-        }
-
-        private static string BuildVisionPrompt(string userRequest)
-        {
-            return
-                "You are a Unity 3D reconstruction agent. Analyze the attached reference image and return ONLY valid JSON. " +
-                "Create a recognizable 3D BLOCKOUT from Unity primitives. Ignore editor UI, scene gizmos, red/blue rig handles, bone lines, transform arrows, grids, cameras and lights unless explicitly requested. " +
-                "Focus on the actual visible object. Use meters and keep the reconstruction roughly 1 to 2.5 meters tall. " +
-                "Prefer 8-35 meaningful parts; maximum 60. Available primitives: Cube, Sphere, Capsule, Cylinder, Plane, Quad. " +
-                "Each object needs a unique id. parentId may be empty or the id of an earlier object. position/rotation/scale are LOCAL to the parent. " +
-                "Use hexadecimal colors like #3A3A3A. Unless collision is important, keepCollider=false. " +
-                "JSON schema: {\"message\":\"short summary\",\"rootName\":\"AI_Recreation\",\"objects\":[{" +
-                "\"id\":\"part1\",\"parentId\":\"\",\"name\":\"Body\",\"primitive\":\"Capsule\",\"position\":{\"x\":0,\"y\":1,\"z\":0}," +
-                "\"rotation\":{\"x\":0,\"y\":0,\"z\":0},\"scale\":{\"x\":1,\"y\":1,\"z\":1},\"color\":\"#808080\",\"keepCollider\":false}]}. " +
-                "Do not include markdown fences or explanations outside JSON. USER REQUEST: " + userRequest;
-        }
-
-        private void HandleRecreationResponse(string modelText)
-        {
-            try
-            {
-                RecreationPlan plan = JsonUtility.FromJson<RecreationPlan>(ExtractJsonObject(modelText));
-                if (plan == null || plan.objects == null || plan.objects.Length == 0)
-                {
-                    resultText = "Vision model did not return a usable 3D plan.\n\n" + modelText;
-                    return;
+                    if (o == null || n >= 60) break; PrimitiveType pt; if (!TryPrimitive(o.primitive, out pt)) pt = PrimitiveType.Cube;
+                    GameObject go = GameObject.CreatePrimitive(pt); go.name = CleanName(o.name); Transform par = root.transform;
+                    GameObject parent; if (!string.IsNullOrEmpty(o.parentId) && made.TryGetValue(o.parentId, out parent)) par = parent.transform;
+                    go.transform.SetParent(par, false); go.transform.localPosition = V(o.position, Vector3.zero); go.transform.localEulerAngles = V(o.rotation, Vector3.zero); go.transform.localScale = V(o.scale, Vector3.one);
+                    Renderer rr = go.GetComponent<Renderer>(); Color cc; if (rr != null && ColorUtility.TryParseHtmlString(o.color, out cc)) { Shader s = Shader.Find("Universal Render Pipeline/Lit") ?? Shader.Find("Standard"); if (s != null) { Material mat = new Material(s); mat.color = cc; rr.sharedMaterial = mat; } }
+                    made[o.id ?? ("p" + n)] = go; n++;
                 }
-
-                if (plan.objects.Length > 60)
-                {
-                    RecreationObject[] bounded = new RecreationObject[60];
-                    Array.Copy(plan.objects, bounded, 60);
-                    plan.objects = bounded;
-                }
-
-                lastRecreationPlan = plan;
-                resultText = (string.IsNullOrWhiteSpace(plan.message) ? "3D recreation planned." : plan.message) + "\nParts: " + plan.objects.Length;
-
-                if (pictureAutoCreate)
-                {
-                    resultText += "\n\n" + ApplyRecreationPlan(plan);
-                    lastRecreationPlan = null;
-                }
-                else
-                {
-                    resultText += "\nAuto-create is OFF. Click CREATE LAST PICTURE PLAN IN SCENE.";
-                }
+                Selection.activeGameObject = root; result = "✅ Recreated " + n + " parts.";
             }
-            catch (Exception ex)
-            {
-                resultText = "Could not parse the vision plan: " + ex.Message + "\n\nMODEL RESPONSE:\n" + modelText;
-            }
+            catch (Exception ex) { result = "Picture plan failed: " + ex.Message + "\n" + text; }
+        }
+        private static Vector3 V(Vec3 v, Vector3 fallback) => v == null ? fallback : new Vector3(v.x, v.y, v.z);
+        private static string ImageBase64(Texture2D src, int max)
+        {
+            float scale = Mathf.Min(1f, (float)max / Mathf.Max(src.width, src.height)); int w = Mathf.Max(1, Mathf.RoundToInt(src.width * scale)); int h = Mathf.Max(1, Mathf.RoundToInt(src.height * scale));
+            RenderTexture rt = RenderTexture.GetTemporary(w, h); RenderTexture old = RenderTexture.active; Graphics.Blit(src, rt); RenderTexture.active = rt;
+            Texture2D t = new Texture2D(w, h, TextureFormat.RGB24, false); t.ReadPixels(new Rect(0, 0, w, h), 0, 0); t.Apply(); RenderTexture.active = old; RenderTexture.ReleaseTemporary(rt);
+            byte[] jpg = t.EncodeToJPG(82); DestroyImmediate(t); return Convert.ToBase64String(jpg);
         }
 
-        private string ApplyRecreationPlan(RecreationPlan plan)
+        private void Send(string json, int timeout, Action<string> success)
         {
-            string rootName = SanitizeName(string.IsNullOrWhiteSpace(plan.rootName) ? "AI_Recreation" : plan.rootName);
-            GameObject root = new GameObject(rootName);
-            Undo.RegisterCreatedObjectUndo(root, "AI Picture Recreation");
-
-            Dictionary<string, GameObject> created = new Dictionary<string, GameObject>(StringComparer.OrdinalIgnoreCase);
-            int made = 0;
-
-            foreach (RecreationObject item in plan.objects)
-            {
-                if (item == null || string.IsNullOrWhiteSpace(item.id))
-                    continue;
-
-                PrimitiveType primitive;
-                if (!TryPrimitive(item.primitive, out primitive))
-                    primitive = PrimitiveType.Cube;
-
-                GameObject go = GameObject.CreatePrimitive(primitive);
-                go.name = SanitizeName(string.IsNullOrWhiteSpace(item.name) ? item.id : item.name);
-
-                Transform parent = root.transform;
-                GameObject parentObject;
-                if (!string.IsNullOrWhiteSpace(item.parentId) && created.TryGetValue(item.parentId, out parentObject))
-                    parent = parentObject.transform;
-
-                go.transform.SetParent(parent, false);
-                go.transform.localPosition = ToVector(item.position, Vector3.zero);
-                go.transform.localEulerAngles = ToVector(item.rotation, Vector3.zero);
-                go.transform.localScale = ClampScale(ToVector(item.scale, Vector3.one));
-                ApplyColor(go, item.color);
-
-                if (!item.keepCollider)
-                {
-                    Collider c = go.GetComponent<Collider>();
-                    if (c != null)
-                        DestroyImmediate(c);
-                }
-
-                created[item.id] = go;
-                made++;
-            }
-
-            Selection.activeGameObject = root;
-            EditorGUIUtility.PingObject(root);
-            if (root.scene.IsValid())
-                EditorSceneManager.MarkSceneDirty(root.scene);
-
-            return "✅ Created " + made + " 3D parts under '" + root.name + "'. Ctrl+Z will undo the recreation.";
-        }
-
-        private static void ApplyColor(GameObject go, string hex)
-        {
-            if (string.IsNullOrWhiteSpace(hex))
-                return;
-
-            Color color;
-            if (!ColorUtility.TryParseHtmlString(hex.Trim(), out color))
-                return;
-
-            Renderer renderer = go.GetComponent<Renderer>();
-            if (renderer == null)
-                return;
-
-            Shader shader = Shader.Find("Universal Render Pipeline/Lit");
-            if (shader == null) shader = Shader.Find("Standard");
-            if (shader == null) return;
-
-            Material material = new Material(shader);
-            material.name = "AI_" + go.name + "_Mat";
-            material.color = color;
-            renderer.sharedMaterial = material;
-        }
-
-        private static string BuildOptimizedImageBase64(Texture2D source, int maxDimension)
-        {
-            if (source == null)
-                throw new InvalidOperationException("No picture selected.");
-
-            int width = source.width;
-            int height = source.height;
-            float scale = Mathf.Min(1f, (float)maxDimension / Mathf.Max(width, height));
-            int targetW = Mathf.Max(1, Mathf.RoundToInt(width * scale));
-            int targetH = Mathf.Max(1, Mathf.RoundToInt(height * scale));
-
-            RenderTexture rt = RenderTexture.GetTemporary(targetW, targetH, 0, RenderTextureFormat.ARGB32);
-            RenderTexture old = RenderTexture.active;
-            Graphics.Blit(source, rt);
-            RenderTexture.active = rt;
-
-            Texture2D resized = new Texture2D(targetW, targetH, TextureFormat.RGB24, false);
-            resized.ReadPixels(new Rect(0, 0, targetW, targetH), 0, 0);
-            resized.Apply();
-
-            RenderTexture.active = old;
-            RenderTexture.ReleaseTemporary(rt);
-
-            byte[] jpg = resized.EncodeToJPG(82);
-            DestroyImmediate(resized);
-            return Convert.ToBase64String(jpg);
-        }
-
-        private void SendOllama(string json, string workingMessage, int timeoutSeconds, Action<string> onSuccess)
-        {
-            if (string.IsNullOrWhiteSpace(endpoint))
-            {
-                resultText = "Ollama URL is empty.";
-                return;
-            }
-
-            waiting = true;
-            resultText = workingMessage;
-            Repaint();
-
-            UnityWebRequest request = new UnityWebRequest(endpoint.Trim(), "POST");
-            request.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json));
-            request.downloadHandler = new DownloadHandlerBuffer();
-            request.SetRequestHeader("Content-Type", "application/json");
-            request.timeout = timeoutSeconds;
-
-            UnityWebRequestAsyncOperation op = request.SendWebRequest();
-            op.completed += _ =>
+            if (string.IsNullOrWhiteSpace(endpoint)) { result = "Ollama URL is empty"; return; }
+            waiting = true; result = "Working locally..."; Repaint();
+            UnityWebRequest req = new UnityWebRequest(endpoint.Trim(), "POST"); req.uploadHandler = new UploadHandlerRaw(Encoding.UTF8.GetBytes(json)); req.downloadHandler = new DownloadHandlerBuffer(); req.SetRequestHeader("Content-Type", "application/json"); req.timeout = timeout;
+            UnityWebRequestAsyncOperation op = req.SendWebRequest(); op.completed += _ =>
             {
                 waiting = false;
-                if (request.result != UnityWebRequest.Result.Success)
-                {
-                    resultText = "OLLAMA REQUEST FAILED\nHTTP " + request.responseCode + "\n" + request.error + "\n\n" + request.downloadHandler.text;
-                }
-                else
-                {
-                    string text = ExtractOllamaText(request.downloadHandler.text);
-                    onSuccess(text);
-                }
-
-                request.Dispose();
-                Repaint();
+                if (req.result != UnityWebRequest.Result.Success) result = "OLLAMA FAILED\nHTTP " + req.responseCode + "\n" + req.error + "\n" + req.downloadHandler.text;
+                else success(ExtractOllama(req.downloadHandler.text));
+                req.Dispose(); Repaint();
             };
         }
+        private static string ExtractOllama(string json) { OllamaResponse r = JsonUtility.FromJson<OllamaResponse>(json); if (r == null) return "Empty response"; if (!string.IsNullOrEmpty(r.error)) return "OLLAMA ERROR: " + r.error; return r.response ?? ""; }
+        private static string ExtractJson(string text) { string t = text.Trim(); int s = t.IndexOf('{'); int e = t.LastIndexOf('}'); if (s < 0 || e <= s) throw new InvalidOperationException("No JSON object found"); return t.Substring(s, e - s + 1); }
 
-        private static string GetHierarchyPath(Transform t)
+        [Serializable] private class OllamaOptions { public int num_ctx; public int num_predict; public float temperature; }
+        [Serializable] private class OllamaRequest { public string model; public string prompt; public bool stream; public string keep_alive; public OllamaOptions options; }
+        [Serializable] private class OllamaAgentRequest { public string model; public string system; public string prompt; public bool stream; public string format; public string keep_alive; public OllamaOptions options; }
+        [Serializable] private class OllamaVisionRequest { public string model; public string prompt; public bool stream; public string format; public string[] images; public string keep_alive; public OllamaOptions options; }
+        [Serializable] private class OllamaResponse { public string response; public string error; }
+        [Serializable] private class AgentPlan { public string message; public AgentAction[] actions; }
+        [Serializable] private class AgentAction
         {
-            if (t == null) return "";
-            List<string> names = new List<string>();
-            while (t != null)
-            {
-                names.Add(t.name);
-                t = t.parent;
-            }
-            names.Reverse();
-            return string.Join("/", names.ToArray());
+            public string type; public string name; public string parentPath; public string targetPath; public string uiType; public string text; public string color; public string[] components;
+            public string componentType; public string field; public string value; public string path; public string content; public string primitive; public bool boolValue;
+            public float x; public float y; public float z; public float width; public float height; public int fontSize;
         }
-
-        private static string AssetPathToFullPath(string assetPath)
-        {
-            if (string.IsNullOrWhiteSpace(assetPath)) return null;
-            string projectRoot = Directory.GetParent(Application.dataPath).FullName;
-            return Path.GetFullPath(Path.Combine(projectRoot, assetPath.Replace('/', Path.DirectorySeparatorChar)));
-        }
-
-        private static string ExtractJsonObject(string text)
-        {
-            if (string.IsNullOrWhiteSpace(text))
-                throw new InvalidOperationException("The model returned an empty response.");
-
-            string trimmed = text.Trim();
-            if (trimmed.StartsWith("```"))
-            {
-                int firstNewline = trimmed.IndexOf('\n');
-                int lastFence = trimmed.LastIndexOf("```");
-                if (firstNewline >= 0 && lastFence > firstNewline)
-                    trimmed = trimmed.Substring(firstNewline + 1, lastFence - firstNewline - 1).Trim();
-            }
-
-            int start = trimmed.IndexOf('{');
-            int end = trimmed.LastIndexOf('}');
-            if (start < 0 || end <= start)
-                throw new InvalidOperationException("No JSON object was found.");
-            return trimmed.Substring(start, end - start + 1);
-        }
-
-        private static string ExtractOllamaText(string json)
-        {
-            try
-            {
-                OllamaResponse response = JsonUtility.FromJson<OllamaResponse>(json);
-                if (response == null) return "Ollama returned an empty response.";
-                if (!string.IsNullOrEmpty(response.error)) return "OLLAMA ERROR: " + response.error;
-                return response.response ?? "";
-            }
-            catch (Exception ex)
-            {
-                return "Could not parse Ollama response: " + ex.Message + "\n\nRaw response:\n" + json;
-            }
-        }
-
-        private static bool TryPrimitive(string value, out PrimitiveType type)
-        {
-            switch ((value ?? "").Trim().ToLowerInvariant())
-            {
-                case "sphere": type = PrimitiveType.Sphere; return true;
-                case "capsule": type = PrimitiveType.Capsule; return true;
-                case "cylinder": type = PrimitiveType.Cylinder; return true;
-                case "plane": type = PrimitiveType.Plane; return true;
-                case "quad": type = PrimitiveType.Quad; return true;
-                case "cube": type = PrimitiveType.Cube; return true;
-                default: type = PrimitiveType.Cube; return false;
-            }
-        }
-
-        private static Vector3 ToVector(Vector3Data v, Vector3 fallback)
-        {
-            return v == null ? fallback : new Vector3(v.x, v.y, v.z);
-        }
-
-        private static Vector3 ClampScale(Vector3 v)
-        {
-            return new Vector3(
-                Mathf.Clamp(Mathf.Abs(v.x), 0.01f, 10f),
-                Mathf.Clamp(Mathf.Abs(v.y), 0.01f, 10f),
-                Mathf.Clamp(Mathf.Abs(v.z), 0.01f, 10f));
-        }
-
-        private static string SanitizeName(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return "AI_Part";
-            return value.Replace('/', '_').Replace('\\', '_').Trim();
-        }
-
-        [Serializable]
-        private class OllamaRequest
-        {
-            public string model;
-            public string prompt;
-            public bool stream;
-            public string keep_alive;
-            public OllamaOptions options;
-        }
-
-        [Serializable]
-        private class OllamaAgentRequest
-        {
-            public string model;
-            public string system;
-            public string prompt;
-            public bool stream;
-            public string format;
-            public string keep_alive;
-            public OllamaOptions options;
-        }
-
-        [Serializable]
-        private class OllamaVisionRequest
-        {
-            public string model;
-            public string prompt;
-            public bool stream;
-            public string format;
-            public string[] images;
-            public string keep_alive;
-            public OllamaOptions options;
-        }
-
-        [Serializable]
-        private class OllamaOptions
-        {
-            public int num_ctx;
-            public int num_predict;
-            public float temperature;
-        }
-
-        [Serializable]
-        private class OllamaResponse
-        {
-            public string response;
-            public string error;
-        }
-
-        [Serializable]
-        private class AgentPlan
-        {
-            public string message;
-            public AgentAction[] actions;
-        }
-
-        [Serializable]
-        private class AgentAction
-        {
-            public string type;
-            public string targetPath;
-            public string name;
-            public string parentPath;
-            public string primitive;
-            public string path;
-            public string content;
-            public string componentType;
-            public string field;
-            public string value;
-            public bool boolValue;
-            public float x;
-            public float y;
-            public float z;
-        }
-
-        [Serializable]
-        private class RecreationPlan
-        {
-            public string message;
-            public string rootName;
-            public RecreationObject[] objects;
-        }
-
-        [Serializable]
-        private class RecreationObject
-        {
-            public string id;
-            public string parentId;
-            public string name;
-            public string primitive;
-            public Vector3Data position;
-            public Vector3Data rotation;
-            public Vector3Data scale;
-            public string color;
-            public bool keepCollider;
-        }
-
-        [Serializable]
-        private class Vector3Data
-        {
-            public float x;
-            public float y;
-            public float z;
-        }
+        [Serializable] private class RecreationPlan { public string message; public string rootName; public RecreationObject[] objects; }
+        [Serializable] private class RecreationObject { public string id; public string parentId; public string name; public string primitive; public Vec3 position; public Vec3 rotation; public Vec3 scale; public string color; }
+        [Serializable] private class Vec3 { public float x; public float y; public float z; }
     }
 }
