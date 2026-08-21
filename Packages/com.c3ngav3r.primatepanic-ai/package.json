@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "displayName": "Primate Panic AI",
-  "description": "Fast local Unity Editor AI agent for Primate Panic powered by Ollama. Uses bounded in-memory Console errors instead of Editor.log file reads and can apply safe project edits directly.",
+  "description": "Local picture-to-Unity reconstruction tool powered by Ollama vision models. Pick a reference image and build a bounded 3D Unity blockout directly in the scene.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
