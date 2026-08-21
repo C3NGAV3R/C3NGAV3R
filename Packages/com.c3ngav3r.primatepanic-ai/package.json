@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "displayName": "Primate Panic AI",
-  "description": "Local picture-to-Unity reconstruction tool powered by Ollama vision models. Pick a reference image and build a bounded 3D Unity blockout directly in the scene.",
+  "description": "Local multi-mode Unity AI tool powered by Ollama. Switch between Agent Mode, safe Plan Mode, and Picture-to-3D reconstruction.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
