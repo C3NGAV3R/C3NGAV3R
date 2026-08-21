@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "displayName": "Primate Panic AI",
-  "description": "Local multi-mode Unity AI tool powered by Ollama. Agent Mode can now create new GameObjects and standalone systems automatically without requiring a selected object.",
+  "description": "Local multi-mode Unity AI tool powered by Ollama. Agent Mode now has real UI creation actions for functional Canvas, panels, text, buttons, sliders and EventSystem objects instead of empty GameObjects.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
