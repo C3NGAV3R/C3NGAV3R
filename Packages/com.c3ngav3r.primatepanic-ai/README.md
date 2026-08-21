@@ -1,57 +1,40 @@
 # Primate Panic AI
 
-Local Unity Editor AI agent for Primate Panic, powered by Ollama.
+Local picture-to-Unity reconstruction tool powered by Ollama.
 
-## Install / update from Git URL
+## Install / update
 
 In Unity open **Window > Package Manager**, click **+**, choose **Add package from git URL...**, then paste:
 
 `https://github.com/C3NGAV3R/C3NGAV3R.git?path=/Packages/com.c3ngav3r.primatepanic-ai`
 
-## Open
+Open with **Tools > Primate Panic AI**.
 
-After installation use **Tools > Primate Panic AI**.
+## Vision model
 
-## Local AI setup
+Install the recommended local vision model:
 
-Install Ollama and keep it running on the same PC as Unity.
+`ollama run qwen2.5vl:3b`
 
-Recommended model:
-
-`ollama run qwen2.5-coder:7b`
-
-Default endpoint:
+The plugin talks to:
 
 `http://127.0.0.1:11434/api/generate`
 
-No OpenAI API key is required.
+Qwen2.5-VL accepts image input. No OpenAI API key is required.
 
-## Agent Mode in v0.3.0
+## v0.4.0 Picture -> Unity
 
-The **RUN AGENT** button can now inspect the selected GameObject, include the source code of attached MonoBehaviours, optionally include the recent Unity Editor log, and execute a bounded set of Unity project changes directly.
+The old selected-GameObject inspector has been removed from the main workflow.
 
-Allowed direct actions include:
+1. Click **Pick Reference Picture**.
+2. Choose a PNG/JPG reference image.
+3. The plugin shows a preview and downsizes the image before sending it locally to reduce lag.
+4. Describe what should be recreated.
+5. Click **RECREATE PICTURE IN UNITY**.
+6. The vision model returns a bounded structured 3D plan and Unity creates the reconstruction directly in the current scene.
 
-- Create or replace `.cs`, `.json`, and `.txt` files under `Assets/`
-- Add a component to the selected GameObject
-- Remove a component from the selected GameObject
-- Enable or disable the selected GameObject
-- Change the selected GameObject local position, rotation, or scale
-- Set primitive, enum, string, and scene-object-reference fields/properties on a selected component
+The reconstruction is a 3D blockout made from Unity primitives (Cube, Sphere, Capsule, Cylinder, Plane and Quad), with hierarchy, transforms and approximate colors. It cannot recover the exact original mesh, rig, animation or hidden geometry from one flat screenshot.
 
-Existing files replaced by Agent Mode are backed up under:
+The vision prompt tells the model to ignore Unity editor UI, scene gizmos, transform handles and rig/bone lines unless requested.
 
-`Library/PrimatePanicAIBackups/`
-
-The agent is intentionally not given arbitrary shell/PowerShell access or unrestricted access outside the Unity project's `Assets/` directory.
-
-## Controls
-
-- **Test Ollama**: verifies the local model connection
-- **Inspect Selected**: fills the prompt with information about the selected GameObject
-- **Ask Only**: asks the local model without applying project changes
-- **RUN AGENT**: asks the model for a structured action plan and applies it when Auto Apply is enabled
-- **Apply AI actions automatically**: when enabled, RUN AGENT edits the project immediately
-- **Include recent Unity Editor log**: gives the model recent Unity Editor log context
-
-Keep source control or project backups for important work even though script replacements also receive local backups.
+Recreations are grouped under one root object and can be undone with Ctrl+Z.
