@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "displayName": "Primate Panic AI",
-  "description": "Local Unity AI powered by Ollama. v1.0.1 fixes the missing Smart Brain Unity meta file while keeping the planner-reviewer-executor flow, strict structured outputs, separate-scene creation, real UI construction, and safer project actions.",
+  "description": "Local Unity AI powered by Ollama. v1.0.2 replaces the broken Smart Brain schema implementation with a clean Qwen3 8B planner-reviewer-executor, fixes the cascading C# compile errors, and keeps separate-scene creation, real UI construction, and bounded project actions.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
