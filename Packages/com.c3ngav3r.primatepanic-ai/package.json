@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "1.0.4",
+  "version": "1.1.0",
   "displayName": "Primate Panic AI",
-  "description": "Local Unity AI powered by Ollama. v1.0.4 keeps the Smart Brain planner-reviewer-executor and World Space Canvas support, and defaults existing qwen3:8b users to the much lighter qwen3:4b local model to reduce out-of-memory failures with no API credits.",
+  "description": "Local Unity AI powered by Ollama. v1.1 adds SOL LOCAL: a no-credits multi-pass architect-planner-reviewer-executor-verifier agent with one bounded auto-repair pass, low-memory Qwen3 4B defaults, project context inspection, selected script source reading, recent Console error context, World Space UI support through the shared bounded executor, and zero-action recovery.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
