@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "displayName": "Primate Panic AI",
-  "description": "Local Unity AI powered by Ollama. v1.0.3 adds zero-action recovery/fallback for planner-reviewer runs and direct World Space Canvas size, scale, position and rotation support while preserving bounded Unity project actions.",
+  "description": "Local Unity AI powered by Ollama. v1.0.4 keeps the Smart Brain planner-reviewer-executor and World Space Canvas support, and defaults existing qwen3:8b users to the much lighter qwen3:4b local model to reduce out-of-memory failures with no API credits.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
