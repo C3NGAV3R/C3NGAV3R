@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.fixer-unity",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "displayName": "FIXER UNITY - Console & Builder",
-  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder tools. Uses a lightweight local Ollama coding model and includes deterministic quick fixes for common Unity compile errors.",
+  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.1 adds missing-uiType inference, automatic fallback Canvas creation, World Space loading-screen recovery, AudioSource field support, existing-scene reuse, and protection against accidental deactivation of newly created objects.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
