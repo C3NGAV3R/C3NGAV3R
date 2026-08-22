@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.fixer-unity",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "displayName": "FIXER UNITY - Console & Builder",
-  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.2 adds a MenuRoom visibility repair that replaces invisible empty room pieces with real visible Unity primitives, colliders and generated materials inside SampleScene.",
+  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.3 adds a deterministic SampleScene start-room/menu recovery: re-enables MenuRoom and LoadingCanvas, restores World Space menu placement, removes malformed 'Create ...' duplicates, rebuilds visible room primitives, repairs MenuSpawnPoint, and disables the accidental FixerCanvas.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
