@@ -42,9 +42,9 @@ namespace C3NGAV3R.PrimatePanicAI
         private void OnGUI()
         {
             EditorGUILayout.Space(8);
-            EditorGUILayout.LabelField("Primate Panic AI - SMART BRAIN v1.0.2", EditorStyles.boldLabel);
+            EditorGUILayout.LabelField("Primate Panic AI - SMART BRAIN v1.0.3", EditorStyles.boldLabel);
             EditorGUILayout.HelpBox(
-                "SMART BRAIN uses Qwen3 locally with a planner pass, reviewer pass, then a bounded Unity executor. No paid API key is required.",
+                "Planner -> reviewer -> executor. v1.0.3 prevents useful plans being wiped to zero actions and adds direct World Space Canvas support.",
                 MessageType.Info);
 
             EditorGUI.BeginChangeCheck();
@@ -73,7 +73,7 @@ namespace C3NGAV3R.PrimatePanicAI
             GameObject selected = Selection.activeGameObject;
             EditorGUILayout.HelpBox(
                 selected == null
-                    ? "Nothing selected. New creation requests can still run."
+                    ? "Nothing selected. Creation and rebuild requests can still run."
                     : "Selected: " + GetHierarchyPath(selected.transform),
                 MessageType.None);
 
@@ -136,59 +136,118 @@ namespace C3NGAV3R.PrimatePanicAI
                     return;
                 }
 
-                if (first == null)
+                if (HasActions(first))
                 {
-                    result = "Planner returned no plan.";
+                    ReviewAndExecute(first, context, false);
                     return;
                 }
 
-                result = "2/3 SMART REVIEWER is checking " + (first.actions == null ? 0 : first.actions.Length) + " actions...";
+                result = "Planner returned 0 actions. SMART RECOVERY is forcing an executable plan...";
                 Repaint();
 
-                string reviewPrompt =
-                    "ORIGINAL USER REQUEST:\n" + prompt.Trim() +
-                    "\n\nUNITY CONTEXT:\n" + context +
-                    "\n\nPLANNER PLAN TO REVIEW:\n" + JsonUtility.ToJson(first, true) +
-                    "\n\nReturn ONLY corrected JSON in the same schema. Remove impossible, duplicate, unsafe, fake-asset, or irrelevant actions. Keep the plan compact and executable.";
+                string rescuePrompt = context +
+                    "\n\nIMPORTANT RECOVERY: The previous planner returned zero actions. The user gave an actionable Unity create/modify/rebuild request. " +
+                    "Zero actions is invalid. Produce concrete supported actions that actually perform the request. Do not merely explain it.";
 
-                GenerateRequest reviewer = NewRequest(BuildReviewerSystem(), reviewPrompt, 5000);
-                Send(reviewer, 600, reviewedText =>
+                GenerateRequest rescue = NewRequest(BuildPlannerSystem() +
+                    " For any actionable create, modify, rebuild, fix, add, remove, scene, UI, script, or setup request, actions MUST contain at least one executable action.",
+                    rescuePrompt,
+                    5000);
+
+                Send(rescue, 600, rescueText =>
                 {
-                    AgentPlan finalPlan;
+                    AgentPlan recovered;
                     try
                     {
-                        finalPlan = ParsePlan(reviewedText);
+                        recovered = ParsePlan(rescueText);
                     }
                     catch (Exception ex)
                     {
-                        result = "Reviewer output could not be parsed: " + ex.Message + "\n\n" + reviewedText;
+                        result = "Recovery plan could not be parsed: " + ex.Message + "\n\n" + rescueText;
                         return;
                     }
 
-                    int count = finalPlan.actions == null ? 0 : finalPlan.actions.Length;
-                    StringBuilder sb = new StringBuilder();
-                    sb.AppendLine(string.IsNullOrWhiteSpace(finalPlan.message) ? "Reviewed plan ready." : finalPlan.message);
-                    sb.AppendLine("Reviewed actions: " + count);
-
-                    if (planOnly)
+                    if (!HasActions(recovered))
                     {
-                        sb.AppendLine("\nPLAN ONLY — nothing changed.");
-                        if (finalPlan.actions != null)
-                        {
-                            for (int i = 0; i < finalPlan.actions.Length; i++)
-                                sb.AppendLine((i + 1) + ". " + Describe(finalPlan.actions[i]));
-                        }
-                        result = sb.ToString();
+                        result = "SMART BRAIN still returned 0 actions after recovery. Try a shorter request or select the object you want changed.";
                         return;
                     }
 
-                    result = "3/3 EXECUTOR is applying the reviewed plan...";
-                    Repaint();
-                    sb.AppendLine();
-                    sb.AppendLine(ApplyPlan(finalPlan));
-                    result = sb.ToString();
+                    ReviewAndExecute(recovered, context, true);
                 });
             });
+        }
+
+        private void ReviewAndExecute(AgentPlan first, string context, bool recovered)
+        {
+            int firstCount = first.actions == null ? 0 : first.actions.Length;
+            result = "2/3 SMART REVIEWER is checking " + firstCount + " actions...";
+            Repaint();
+
+            string reviewPrompt =
+                "ORIGINAL USER REQUEST:\n" + prompt.Trim() +
+                "\n\nUNITY CONTEXT:\n" + context +
+                "\n\nPLANNER PLAN TO REVIEW:\n" + JsonUtility.ToJson(first, true) +
+                "\n\nReturn ONLY corrected JSON in the same schema. Fix bad actions instead of deleting the whole plan. " +
+                "If the incoming plan has executable actions and the user requested a change, your final actions array MUST NOT be empty.";
+
+            GenerateRequest reviewer = NewRequest(BuildReviewerSystem(), reviewPrompt, 5000);
+            Send(reviewer, 600, reviewedText =>
+            {
+                AgentPlan finalPlan = null;
+                string fallbackReason = "";
+
+                try
+                {
+                    finalPlan = ParsePlan(reviewedText);
+                }
+                catch (Exception ex)
+                {
+                    fallbackReason = "Reviewer JSON failed (" + ex.Message + "). Using planner plan.";
+                }
+
+                if (!HasActions(finalPlan) && HasActions(first))
+                {
+                    if (string.IsNullOrEmpty(fallbackReason))
+                        fallbackReason = "Reviewer tried to erase all actions. Using the valid planner plan instead.";
+                    finalPlan = first;
+                }
+
+                if (!HasActions(finalPlan))
+                {
+                    result = "No executable actions survived planning/review.";
+                    return;
+                }
+
+                int count = finalPlan.actions.Length;
+                StringBuilder sb = new StringBuilder();
+                sb.AppendLine(string.IsNullOrWhiteSpace(finalPlan.message) ? "Reviewed plan ready." : finalPlan.message);
+                sb.AppendLine("Reviewed actions: " + count);
+                if (recovered)
+                    sb.AppendLine("SMART RECOVERY: planner was automatically regenerated because the first plan was empty.");
+                if (!string.IsNullOrEmpty(fallbackReason))
+                    sb.AppendLine("SMART SAFETY FALLBACK: " + fallbackReason);
+
+                if (planOnly)
+                {
+                    sb.AppendLine("\nPLAN ONLY — nothing changed.");
+                    for (int i = 0; i < finalPlan.actions.Length; i++)
+                        sb.AppendLine((i + 1) + ". " + Describe(finalPlan.actions[i]));
+                    result = sb.ToString();
+                    return;
+                }
+
+                result = "3/3 EXECUTOR is applying " + count + " actions...";
+                Repaint();
+                sb.AppendLine();
+                sb.AppendLine(ApplyPlan(finalPlan));
+                result = sb.ToString();
+            });
+        }
+
+        private static bool HasActions(AgentPlan plan)
+        {
+            return plan != null && plan.actions != null && plan.actions.Length > 0;
         }
 
         private GenerateRequest NewRequest(string system, string userPrompt, int numPredict)
@@ -205,7 +264,7 @@ namespace C3NGAV3R.PrimatePanicAI
                 {
                     num_ctx = 8192,
                     num_predict = numPredict,
-                    temperature = 0.05f,
+                    temperature = 0.04f,
                     seed = 42,
                     repeat_penalty = 1.06f
                 }
@@ -240,7 +299,8 @@ namespace C3NGAV3R.PrimatePanicAI
 
             sb.AppendLine();
             sb.AppendLine("PROJECT RULES:");
-            sb.AppendLine("- Do not alter Gorilla locomotion, XR Origin, Main Camera, Photon, or player Rigidbody unless explicitly requested.");
+            sb.AppendLine("- Do not alter Gorilla locomotion, XR Origin, gameplay Main Camera, Photon, or player Rigidbody unless explicitly requested.");
+            sb.AppendLine("- A separate loading/menu scene may have its own Camera if a World Space Canvas needs one; never replace the gameplay camera.");
             sb.AppendLine("- New visible UI must use real Unity UI components, never 3D fake buttons.");
             sb.AppendLine("- Never fabricate binary PNG/JPG/FBX/font assets by writing text into them.");
             sb.AppendLine("- New custom C# scripts may require a second run after Unity recompiles before they can be attached/wired.");
@@ -251,11 +311,15 @@ namespace C3NGAV3R.PrimatePanicAI
         {
             return
                 "You are the planning brain of a Unity Editor agent. Return ONLY valid JSON and no markdown. " +
-                "Schema: {\"message\":\"short summary\",\"actions\":[{\"type\":\"create_scene|open_scene|create_ui|create_gameobject|create_or_replace_file|add_component|remove_component|set_active|set_transform|set_component_field\",\"name\":\"optional\",\"scenePath\":\"optional Assets/Scenes/X.unity\",\"parentPath\":\"optional\",\"targetPath\":\"optional\",\"uiType\":\"canvas|background|image|panel|title|text|button|slider|eventsystem\",\"text\":\"optional\",\"color\":\"#RRGGBBAA\",\"path\":\"optional Assets/...\",\"content\":\"complete file content\",\"componentType\":\"optional\",\"field\":\"optional\",\"value\":\"optional\",\"primitive\":\"Cube|Sphere|Capsule|Cylinder|Plane|Quad\",\"boolValue\":true,\"x\":0,\"y\":0,\"z\":0,\"width\":400,\"height\":80,\"fontSize\":36,\"components\":[\"optional component types\"]}]}. " +
-                "Use only those action types. When the user asks for a NEW scene, actually use create_scene first and give later actions the correct scenePath. " +
-                "Visible UI must use create_ui. create_ui already adds real Canvas/Image/Text/Button/Slider/EventSystem components, so prefer x,y,width,height,fontSize,color directly instead of many field edits. " +
+                "Schema: {\"message\":\"short summary\",\"actions\":[{\"type\":\"create_scene|open_scene|create_ui|create_gameobject|create_or_replace_file|add_component|remove_component|set_active|set_transform|set_component_field\",\"name\":\"optional\",\"scenePath\":\"optional Assets/Scenes/X.unity\",\"parentPath\":\"optional\",\"targetPath\":\"optional\",\"uiType\":\"canvas|background|image|panel|title|text|button|slider|eventsystem\",\"text\":\"optional\",\"color\":\"#RRGGBBAA\",\"path\":\"optional Assets/...\",\"content\":\"complete file content\",\"componentType\":\"optional\",\"field\":\"optional\",\"value\":\"optional\",\"primitive\":\"Cube|Sphere|Capsule|Cylinder|Plane|Quad\",\"boolValue\":true,\"worldSpace\":false,\"renderMode\":\"ScreenSpaceOverlay|WorldSpace\",\"x\":0,\"y\":0,\"z\":0,\"rotX\":0,\"rotY\":0,\"rotZ\":0,\"scale\":1,\"width\":400,\"height\":80,\"fontSize\":36,\"components\":[\"optional component types\"]}]}. " +
+                "Use only those action types. For any actionable create/modify/rebuild/fix request, actions MUST NOT be empty. " +
+                "When the user asks for a NEW scene, actually use create_scene first and give later actions the correct scenePath. " +
+                "Visible UI must use create_ui. create_ui automatically adds real Canvas/Image/Text/Button/Slider/EventSystem components. " +
+                "For a World Space Canvas set worldSpace=true or renderMode=WorldSpace and include width,height,x,y,z,rotX,rotY,rotZ and scale. Typical VR loading board: width=1600 height=900 scale=0.003. " +
+                "For child UI prefer x,y,width,height,fontSize,color directly instead of many field edits. " +
                 "For scripts use create_or_replace_file with a real Assets/Scripts/Name.cs path and complete compiling source. " +
-                "Never create fake .png, .jpg, .fbx, .spriteasset or font files. Never create another Camera, XR Origin, Gorilla Rig, player Rigidbody or Photon object unless explicitly requested. " +
+                "Never create fake .png, .jpg, .fbx, .spriteasset or font files. Never replace the gameplay Camera, XR Origin, Gorilla Rig, player Rigidbody or Photon object unless explicitly requested. " +
+                "A separate loading scene may contain a new Camera when required to view World Space UI. " +
                 "Keep the plan under 40 useful actions. Do not repeat JSON keys. Do not output explanation outside the JSON.";
         }
 
@@ -263,15 +327,17 @@ namespace C3NGAV3R.PrimatePanicAI
         {
             return
                 "You are the senior reviewer for a Unity Editor agent. Return ONLY valid corrected JSON in the same schema as the planner. " +
-                "Check that every action is supported, necessary, safe and executable. Fix scene routing, UI hierarchy, dimensions, script paths and compile problems. " +
-                "Remove fake binary asset writes, duplicate Cameras/XR rigs/Rigidbodies/EventSystems, meaningless empty objects, repeated work and unrelated actions. " +
-                "For requested separate scenes ensure create_scene exists before objects targeting that scene. Prefer a small number of strong create_ui actions over brittle set_component_field actions. " +
+                "Check that every action is supported, necessary, safe and executable. Fix bad actions rather than deleting the user's requested feature. " +
+                "IMPORTANT: if the incoming plan contains executable actions for an actionable user request, the final actions array MUST NOT be empty. " +
+                "Fix scene routing, UI hierarchy, dimensions, World Space canvas settings, script paths and compile problems. " +
+                "Remove fake binary asset writes, duplicate gameplay Cameras/XR rigs/Rigidbodies/EventSystems, meaningless empty objects, repeated work and unrelated actions. " +
+                "For requested separate scenes ensure create_scene exists before objects targeting that scene. Prefer strong create_ui actions over brittle field edits. " +
                 "Preserve Gorilla locomotion/XR/Photon unless explicitly targeted.";
         }
 
         private string ApplyPlan(AgentPlan plan)
         {
-            if (plan.actions == null || plan.actions.Length == 0)
+            if (!HasActions(plan))
                 return "No actions to apply.";
 
             StringBuilder sb = new StringBuilder("APPLYING REVIEWED ACTIONS:\n");
@@ -439,16 +505,34 @@ namespace C3NGAV3R.PrimatePanicAI
             if (kind == "canvas")
             {
                 Canvas canvas = go.AddComponent<Canvas>();
-                canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+                bool world = a.worldSpace || string.Equals(a.renderMode, "WorldSpace", StringComparison.OrdinalIgnoreCase);
+                canvas.renderMode = world ? RenderMode.WorldSpace : RenderMode.ScreenSpaceOverlay;
                 canvas.sortingOrder = 100;
+
                 Component scaler = AddByName(go, "UnityEngine.UI.CanvasScaler");
                 AddByName(go, "UnityEngine.UI.GraphicRaycaster");
+
+                if (world)
+                {
+                    rt.sizeDelta = new Vector2(a.width > 0 ? a.width : 1600f, a.height > 0 ? a.height : 900f);
+                    float s = a.scale > 0 ? a.scale : 0.003f;
+                    rt.localScale = new Vector3(s, s, s);
+                    rt.localPosition = new Vector3(a.x, a.y, a.z);
+                    rt.localEulerAngles = new Vector3(a.rotX, a.rotY, a.rotZ);
+                    if (scaler != null)
+                        SetMember(scaler, "dynamicPixelsPerUnit", 10f);
+                    Selection.activeGameObject = go;
+                    message = "Created World Space Canvas " + rt.sizeDelta + " scale=" + s.ToString(CultureInfo.InvariantCulture);
+                    return go;
+                }
+
                 if (scaler != null)
                 {
                     SetEnumMember(scaler, "uiScaleMode", "ScaleWithScreenSize");
                     SetMember(scaler, "referenceResolution", new Vector2(1920, 1080));
                     SetMember(scaler, "matchWidthOrHeight", .5f);
                 }
+
                 Selection.activeGameObject = go;
                 message = "Created Screen Space Overlay Canvas";
                 return go;
@@ -523,7 +607,11 @@ namespace C3NGAV3R.PrimatePanicAI
             GameObject parent = Resolve(a.parentPath);
             if (parent != null)
                 go.transform.SetParent(parent.transform, false);
+
             go.transform.localPosition = new Vector3(a.x, a.y, a.z);
+            go.transform.localEulerAngles = new Vector3(a.rotX, a.rotY, a.rotZ);
+            if (a.scale > 0)
+                go.transform.localScale = Vector3.one * a.scale;
 
             if (a.components != null)
             {
@@ -566,15 +654,9 @@ namespace C3NGAV3R.PrimatePanicAI
 
             if (File.Exists(full))
             {
-                string backupDir = Path.Combine(
-                    Directory.GetParent(Application.dataPath).FullName,
-                    "Library",
-                    "PrimatePanicAIBackups");
+                string backupDir = Path.Combine(Directory.GetParent(Application.dataPath).FullName, "Library", "PrimatePanicAIBackups");
                 Directory.CreateDirectory(backupDir);
-                File.Copy(
-                    full,
-                    Path.Combine(backupDir, DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + "_" + Path.GetFileName(full)),
-                    true);
+                File.Copy(full, Path.Combine(backupDir, DateTime.Now.ToString("yyyyMMdd_HHmmss_fff") + "_" + Path.GetFileName(full)), true);
             }
 
             File.WriteAllText(full, a.content ?? "", new UTF8Encoding(false));
@@ -617,10 +699,13 @@ namespace C3NGAV3R.PrimatePanicAI
             Require(target);
             Undo.RecordObject(target.transform, "SMART transform");
             target.transform.localPosition = new Vector3(a.x, a.y, a.z);
+            target.transform.localEulerAngles = new Vector3(a.rotX, a.rotY, a.rotZ);
+            if (a.scale > 0)
+                target.transform.localScale = Vector3.one * a.scale;
 
             RectTransform rt = target.transform as RectTransform;
-            if (rt != null && (a.width != 0 || a.height != 0))
-                rt.sizeDelta = new Vector2(a.width, a.height);
+            if (rt != null && (a.width > 0 || a.height > 0))
+                rt.sizeDelta = new Vector2(a.width > 0 ? a.width : rt.sizeDelta.x, a.height > 0 ? a.height : rt.sizeDelta.y);
 
             return "Updated transform on " + target.name;
         }
@@ -667,19 +752,14 @@ namespace C3NGAV3R.PrimatePanicAI
             {
                 string[] p = v.Trim('(', ')', '[', ']').Split(',');
                 if (p.Length != 2) throw new FormatException("Vector2 must be x,y");
-                return new Vector2(
-                    float.Parse(p[0], CultureInfo.InvariantCulture),
-                    float.Parse(p[1], CultureInfo.InvariantCulture));
+                return new Vector2(float.Parse(p[0], CultureInfo.InvariantCulture), float.Parse(p[1], CultureInfo.InvariantCulture));
             }
 
             if (t == typeof(Vector3))
             {
                 string[] p = v.Trim('(', ')', '[', ']').Split(',');
                 if (p.Length != 3) throw new FormatException("Vector3 must be x,y,z");
-                return new Vector3(
-                    float.Parse(p[0], CultureInfo.InvariantCulture),
-                    float.Parse(p[1], CultureInfo.InvariantCulture),
-                    float.Parse(p[2], CultureInfo.InvariantCulture));
+                return new Vector3(float.Parse(p[0], CultureInfo.InvariantCulture), float.Parse(p[1], CultureInfo.InvariantCulture), float.Parse(p[2], CultureInfo.InvariantCulture));
             }
 
             if (t == typeof(Color))
@@ -843,6 +923,7 @@ namespace C3NGAV3R.PrimatePanicAI
                 case "inputsystemuiinputmodule": return "UnityEngine.InputSystem.UI.InputSystemUIInputModule";
                 case "recttransform": return "UnityEngine.RectTransform";
                 case "canvas": return "UnityEngine.Canvas";
+                case "camera": return "UnityEngine.Camera";
                 default: return name;
             }
         }
@@ -997,6 +1078,8 @@ namespace C3NGAV3R.PrimatePanicAI
             rt.pivot = new Vector2(.5f, .5f);
             rt.anchoredPosition = new Vector2(a.x, a.y);
             rt.sizeDelta = new Vector2(a.width > 0 ? a.width : w, a.height > 0 ? a.height : h);
+            if (Mathf.Abs(a.rotZ) > 0.001f)
+                rt.localEulerAngles = new Vector3(0, 0, a.rotZ);
         }
 
         private static void SetMember(object obj, string name, object value)
@@ -1031,7 +1114,7 @@ namespace C3NGAV3R.PrimatePanicAI
             if (enumType == null || !enumType.IsEnum)
                 return;
 
-            object value = Enum.Parse(enumType, enumName, true);
+            object value = Enum.Parse(enumType, enumName.Replace(" ", ""), true);
             if (f != null)
                 f.SetValue(obj, value);
             else if (p != null && p.CanWrite)
@@ -1052,16 +1135,12 @@ namespace C3NGAV3R.PrimatePanicAI
 
         private static string CleanName(string value)
         {
-            return string.IsNullOrWhiteSpace(value)
-                ? "AI_Object"
-                : value.Replace('/', '_').Replace('\\', '_').Trim();
+            return string.IsNullOrWhiteSpace(value) ? "AI_Object" : value.Replace('/', '_').Replace('\\', '_').Trim();
         }
 
         private static string AssetToFull(string asset)
         {
-            return Path.GetFullPath(Path.Combine(
-                Directory.GetParent(Application.dataPath).FullName,
-                asset.Replace('/', Path.DirectorySeparatorChar)));
+            return Path.GetFullPath(Path.Combine(Directory.GetParent(Application.dataPath).FullName, asset.Replace('/', Path.DirectorySeparatorChar)));
         }
 
         private static string GetHierarchyPath(Transform t)
@@ -1154,10 +1233,16 @@ namespace C3NGAV3R.PrimatePanicAI
             public string field;
             public string value;
             public string primitive;
+            public string renderMode;
             public bool boolValue;
+            public bool worldSpace;
             public float x;
             public float y;
             public float z;
+            public float rotX;
+            public float rotY;
+            public float rotZ;
+            public float scale;
             public float width;
             public float height;
             public int fontSize;
