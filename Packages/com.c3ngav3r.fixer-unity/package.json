@@ -1,0 +1,10 @@
+{
+  "name": "com.c3ngav3r.fixer-unity",
+  "version": "1.0.0",
+  "displayName": "FIXER UNITY - Console & Builder",
+  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder tools. Uses a lightweight local Ollama coding model and includes deterministic quick fixes for common Unity compile errors.",
+  "unity": "2022.3",
+  "author": {
+    "name": "C3NGAV3R"
+  }
+}
