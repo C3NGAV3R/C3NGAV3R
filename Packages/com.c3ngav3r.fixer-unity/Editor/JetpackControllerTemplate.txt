@@ -89,8 +89,16 @@ public class JetpackController : MonoBehaviour
         lastPrimaryButton = primary;
         upHeld = trigger || keyboardUp;
         moveInput = Vector2.ClampMagnitude(stick + keyboardMove, 1f);
-        activeNow = upHeld || moveInput.sqrMagnitude > 0.0025f || hoverEnabled;
-        UpdateEffects(activeNow);
+
+        bool desiredActive = upHeld || moveInput.sqrMagnitude > 0.0025f || hoverEnabled;
+        if (desiredActive != activeNow)
+        {
+            activeNow = desiredActive;
+            if (activeNow)
+                EnsurePlaying();
+            else
+                StopEffects();
+        }
     }
 
     private void FixedUpdate()
@@ -141,6 +149,7 @@ public class JetpackController : MonoBehaviour
         hoverEnabled = false;
         upHeld = false;
         moveInput = Vector2.zero;
+        activeNow = false;
         StopEffects();
     }
 
@@ -156,21 +165,6 @@ public class JetpackController : MonoBehaviour
     {
         leftController = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
         rightController = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
-    }
-
-    private void UpdateEffects(bool active)
-    {
-        if (active == activeNow)
-        {
-            if (active)
-                EnsurePlaying();
-            return;
-        }
-
-        if (active)
-            EnsurePlaying();
-        else
-            StopEffects();
     }
 
     private void EnsurePlaying()
