@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using System.Reflection;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -12,7 +11,9 @@ namespace C3NGAV3R.FixerUnity
     internal static class FixerUnityJetpackRepair
     {
         private const string PendingKey = "FixerUnity.Jetpack.Pending";
+        private const string PlayerPathKey = PendingKey + ".PlayerPath";
         private const string ScriptPath = "Assets/Scripts/JetpackController.cs";
+        private const string TemplatePath = "Packages/com.c3ngav3r.fixer-unity/Editor/JetpackControllerTemplate.txt";
 
         static FixerUnityJetpackRepair()
         {
@@ -34,25 +35,58 @@ namespace C3NGAV3R.FixerUnity
             {
                 EditorUtility.DisplayDialog(
                     "FIXER UNITY",
-                    "I could not safely identify an EXISTING player Rigidbody. Select your Gorilla/player root (or its Rigidbody object) in the Hierarchy, then run BUILD OR REPAIR VR JETPACK again. I did NOT add a second Rigidbody.",
+                    "I could not safely identify an EXISTING player Rigidbody. Select your Gorilla/player root or its Rigidbody object, then run this command again. I will NOT add a second Rigidbody.",
                     "OK");
                 return;
             }
 
-            WriteControllerScript();
+            if (!WriteControllerScript())
+                return;
+
             SessionState.SetBool(PendingKey, true);
-            SessionState.SetString(PendingKey + ".PlayerPath", HierarchyPath(rb.transform));
+            SessionState.SetString(PlayerPathKey, HierarchyPath(rb.transform));
+            AssetDatabase.ImportAsset(ScriptPath, ImportAssetOptions.ForceUpdate);
             AssetDatabase.Refresh();
 
             EditorUtility.DisplayDialog(
                 "FIXER UNITY",
-                "JetpackController.cs was created/updated. Unity will compile it now, then FIXER UNITY will automatically attach and wire it to your existing player Rigidbody.",
+                "JetpackController.cs was repaired. Unity will compile it now. After compilation, FIXER UNITY will automatically attach and wire it to the EXISTING player Rigidbody.",
                 "OK");
+        }
+
+        private static bool WriteControllerScript()
+        {
+            TextAsset template = AssetDatabase.LoadAssetAtPath<TextAsset>(TemplatePath);
+            if (template == null || string.IsNullOrWhiteSpace(template.text))
+            {
+                EditorUtility.DisplayDialog(
+                    "FIXER UNITY",
+                    "Jetpack template is missing from the package. Reimport/update FIXER UNITY before running the repair.",
+                    "OK");
+                Debug.LogError("FIXER UNITY: Missing " + TemplatePath);
+                return false;
+            }
+
+            try
+            {
+                System.IO.Directory.CreateDirectory("Assets/Scripts");
+                System.IO.File.WriteAllText(ScriptPath, template.text, new System.Text.UTF8Encoding(false));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                EditorUtility.DisplayDialog("FIXER UNITY", "Could not write JetpackController.cs:\n\n" + ex.Message, "OK");
+                Debug.LogException(ex);
+                return false;
+            }
         }
 
         private static void TryFinishPending()
         {
-            if (!SessionState.GetBool(PendingKey, false) || EditorApplication.isCompiling || EditorApplication.isUpdating)
+            if (!SessionState.GetBool(PendingKey, false))
+                return;
+
+            if (EditorApplication.isCompiling || EditorApplication.isUpdating)
                 return;
 
             Type jetpackType = FindType("JetpackController");
@@ -60,7 +94,7 @@ namespace C3NGAV3R.FixerUnity
                 return;
 
             Rigidbody rb = null;
-            string savedPath = SessionState.GetString(PendingKey + ".PlayerPath", "");
+            string savedPath = SessionState.GetString(PlayerPathKey, string.Empty);
             if (!string.IsNullOrWhiteSpace(savedPath))
             {
                 GameObject saved = FindByHierarchyPath(savedPath);
@@ -73,8 +107,8 @@ namespace C3NGAV3R.FixerUnity
 
             if (rb == null)
             {
-                SessionState.SetBool(PendingKey, false);
-                Debug.LogError("FIXER UNITY: Jetpack script compiled, but the existing player Rigidbody could no longer be found. Select the player and run the repair again.");
+                ClearPending();
+                Debug.LogError("FIXER UNITY: Jetpack compiled, but the existing player Rigidbody could not be found.");
                 return;
             }
 
@@ -108,12 +142,10 @@ namespace C3NGAV3R.FixerUnity
             EditorUtility.SetDirty(rb.gameObject);
             EditorSceneManager.MarkSceneDirty(SceneManager.GetActiveScene());
             EditorSceneManager.SaveOpenScenes();
-
             Selection.activeGameObject = rb.gameObject;
-            SessionState.SetBool(PendingKey, false);
-            SessionState.EraseString(PendingKey + ".PlayerPath");
+            ClearPending();
 
-            Debug.Log("FIXER UNITY: VR Jetpack wired successfully to existing Rigidbody on " + rb.gameObject.name + ". Right trigger=up, left stick=move, A=hover, keyboard SPACE/WASD/H=test.");
+            Debug.Log("FIXER UNITY: VR Jetpack wired successfully to existing Rigidbody on " + rb.gameObject.name + ".");
             EditorUtility.DisplayDialog(
                 "FIXER UNITY",
                 "VR JETPACK READY ✅\n\nAttached to: " + rb.gameObject.name +
@@ -122,17 +154,14 @@ namespace C3NGAV3R.FixerUnity
                 "\nLeft joystick: move" +
                 "\nA: toggle hover" +
                 "\nSPACE/WASD/H: Editor test" +
-                "\n\nJetpackAudio has no clip yet. Drag your own sound into its Audio Clip field when you want sound.",
+                "\n\nJetpackAudio has no clip yet. Add your own sound when ready.",
                 "OK");
         }
 
-        private static void WriteControllerScript()
+        private static void ClearPending()
         {
-            string folder = Path.GetDirectoryName(ScriptPath);
-            if (!Directory.Exists(folder))
-                Directory.CreateDirectory(folder);
-
-            File.WriteAllText(ScriptPath, ControllerSource, new System.Text.UTF8Encoding(false));
+            SessionState.SetBool(PendingKey, false);
+            SessionState.EraseString(PlayerPathKey);
         }
 
         private static Rigidbody FindBestPlayerRigidbody()
@@ -140,7 +169,9 @@ namespace C3NGAV3R.FixerUnity
             GameObject selected = Selection.activeGameObject;
             if (selected != null && selected.scene.IsValid())
             {
-                Rigidbody selectedRb = selected.GetComponent<Rigidbody>() ?? selected.GetComponentInParent<Rigidbody>() ?? selected.GetComponentInChildren<Rigidbody>(true);
+                Rigidbody selectedRb = selected.GetComponent<Rigidbody>() ??
+                                       selected.GetComponentInParent<Rigidbody>() ??
+                                       selected.GetComponentInChildren<Rigidbody>(true);
                 if (selectedRb != null)
                     return selectedRb;
             }
@@ -167,12 +198,14 @@ namespace C3NGAV3R.FixerUnity
                 if (path.Contains("button")) score -= 80;
                 if (path.Contains("prop")) score -= 30;
 
-                foreach (Component c in rb.GetComponents<Component>())
+                foreach (Component component in rb.GetComponents<Component>())
                 {
-                    if (c == null) continue;
-                    string n = c.GetType().FullName.ToLowerInvariant();
-                    if (n.Contains("gorillalocomotion")) score += 150;
-                    if (n.EndsWith(".player") || n.Contains("gorillaplayer")) score += 100;
+                    if (component == null)
+                        continue;
+
+                    string typeName = component.GetType().FullName.ToLowerInvariant();
+                    if (typeName.Contains("gorillalocomotion")) score += 150;
+                    if (typeName.Contains("gorillaplayer")) score += 100;
                 }
 
                 if (score > bestScore)
@@ -188,13 +221,13 @@ namespace C3NGAV3R.FixerUnity
         private static Transform FindBestPlayerRoot(Transform rbTransform)
         {
             Transform best = rbTransform;
-            Transform t = rbTransform;
-            while (t != null)
+            Transform current = rbTransform;
+            while (current != null)
             {
-                string n = t.name.ToLowerInvariant();
-                if (n.Contains("gorilla") || n.Contains("player") || n.Contains("xr origin") || n.Contains("xrorigin") || n.Contains("rig"))
-                    best = t;
-                t = t.parent;
+                string name = current.name.ToLowerInvariant();
+                if (name.Contains("gorilla") || name.Contains("player") || name.Contains("xr origin") || name.Contains("xrorigin") || name.Contains("rig"))
+                    best = current;
+                current = current.parent;
             }
             return best;
         }
@@ -203,17 +236,18 @@ namespace C3NGAV3R.FixerUnity
         {
             if (playerRoot != null)
             {
-                Camera c = playerRoot.GetComponentInChildren<Camera>(true);
-                if (c != null) return c.transform;
+                Camera childCamera = playerRoot.GetComponentInChildren<Camera>(true);
+                if (childCamera != null)
+                    return childCamera.transform;
             }
 
             if (Camera.main != null)
                 return Camera.main.transform;
 
-            foreach (Camera c in Resources.FindObjectsOfTypeAll<Camera>())
+            foreach (Camera camera in Resources.FindObjectsOfTypeAll<Camera>())
             {
-                if (c != null && c.gameObject.scene.IsValid() && c.gameObject.scene == SceneManager.GetActiveScene())
-                    return c.transform;
+                if (camera != null && camera.gameObject.scene.IsValid() && camera.gameObject.scene == SceneManager.GetActiveScene())
+                    return camera.transform;
             }
 
             return fallback;
@@ -229,10 +263,15 @@ namespace C3NGAV3R.FixerUnity
                 Undo.RegisterCreatedObjectUndo(go, "FIXER UNITY JetpackAudio");
                 go.transform.SetParent(parent, false);
             }
-            else go = child.gameObject;
+            else
+            {
+                go = child.gameObject;
+            }
 
             AudioSource audio = go.GetComponent<AudioSource>();
-            if (audio == null) audio = Undo.AddComponent<AudioSource>(go);
+            if (audio == null)
+                audio = Undo.AddComponent<AudioSource>(go);
+
             audio.playOnAwake = false;
             audio.loop = true;
             audio.spatialBlend = 1f;
@@ -250,13 +289,17 @@ namespace C3NGAV3R.FixerUnity
                 Undo.RegisterCreatedObjectUndo(go, "FIXER UNITY " + name);
                 go.transform.SetParent(parent, false);
             }
-            else go = child.gameObject;
+            else
+            {
+                go = child.gameObject;
+            }
 
             go.transform.localPosition = localPosition;
             go.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
 
             ParticleSystem ps = go.GetComponent<ParticleSystem>();
-            if (ps == null) ps = Undo.AddComponent<ParticleSystem>(go);
+            if (ps == null)
+                ps = Undo.AddComponent<ParticleSystem>(go);
 
             ParticleSystem.MainModule main = ps.main;
             main.loop = true;
@@ -297,276 +340,79 @@ namespace C3NGAV3R.FixerUnity
 
         private static Type FindType(string shortName)
         {
-            foreach (Assembly a in AppDomain.CurrentDomain.GetAssemblies())
+            foreach (Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
-                Type direct = a.GetType(shortName, false, true);
-                if (direct != null) return direct;
+                Type direct = assembly.GetType(shortName, false, true);
+                if (direct != null)
+                    return direct;
+
                 try
                 {
-                    foreach (Type t in a.GetTypes())
-                        if (string.Equals(t.Name, shortName, StringComparison.OrdinalIgnoreCase))
-                            return t;
+                    foreach (Type type in assembly.GetTypes())
+                    {
+                        if (string.Equals(type.Name, shortName, StringComparison.OrdinalIgnoreCase))
+                            return type;
+                    }
                 }
-                catch (ReflectionTypeLoadException) { }
+                catch (ReflectionTypeLoadException)
+                {
+                }
             }
+
             return null;
         }
 
         private static void SetObject(SerializedObject so, string property, UnityEngine.Object value)
         {
             SerializedProperty p = so.FindProperty(property);
-            if (p != null) p.objectReferenceValue = value;
+            if (p != null)
+                p.objectReferenceValue = value;
         }
 
         private static void SetBool(SerializedObject so, string property, bool value)
         {
             SerializedProperty p = so.FindProperty(property);
-            if (p != null) p.boolValue = value;
+            if (p != null)
+                p.boolValue = value;
         }
 
         private static void SetFloat(SerializedObject so, string property, float value)
         {
             SerializedProperty p = so.FindProperty(property);
-            if (p != null) p.floatValue = value;
+            if (p != null)
+                p.floatValue = value;
         }
 
         private static GameObject FindByHierarchyPath(string path)
         {
-            if (string.IsNullOrWhiteSpace(path)) return null;
+            if (string.IsNullOrWhiteSpace(path))
+                return null;
+
             foreach (GameObject root in SceneManager.GetActiveScene().GetRootGameObjects())
             {
-                foreach (Transform t in root.GetComponentsInChildren<Transform>(true))
-                    if (string.Equals(HierarchyPath(t), path, StringComparison.OrdinalIgnoreCase))
-                        return t.gameObject;
+                foreach (Transform transform in root.GetComponentsInChildren<Transform>(true))
+                {
+                    if (string.Equals(HierarchyPath(transform), path, StringComparison.OrdinalIgnoreCase))
+                        return transform.gameObject;
+                }
             }
+
             return null;
         }
 
-        private static string HierarchyPath(Transform t)
+        private static string HierarchyPath(Transform transform)
         {
-            if (t == null) return "";
-            string path = t.name;
-            while (t.parent != null)
+            if (transform == null)
+                return string.Empty;
+
+            string path = transform.name;
+            Transform current = transform.parent;
+            while (current != null)
             {
-                t = t.parent;
-                path = t.name + "/" + path;
+                path = current.name + "/" + path;
+                current = current.parent;
             }
             return path;
         }
-
-        private const string ControllerSource = @"using System;
-using UnityEngine;
-using UnityEngine.XR;
-
-public class JetpackController : MonoBehaviour
-{
-    [Header("Existing player references")]
-    public Rigidbody playerRigidbody;
-    public Transform playerRoot;
-    public Transform headTransform;
-
-    [Header("Jetpack")]
-    public bool jetpackEnabled = true;
-    public float upwardForce = 12f;
-    public float moveForce = 8f;
-    public float maxSpeed = 12f;
-    public float hoverDamping = 4f;
-
-    [Header("Optional effects")]
-    public AudioSource jetpackAudio;
-    public ParticleSystem leftThruster;
-    public ParticleSystem rightThruster;
-
-    [Header("Runtime")]
-    public bool hoverEnabled;
-
-    private InputDevice leftController;
-    private InputDevice rightController;
-    private bool lastPrimaryButton;
-    private bool upHeld;
-    private Vector2 moveInput;
-    private bool activeNow;
-
-    private void Awake()
-    {
-        if (playerRigidbody == null) playerRigidbody = GetComponent<Rigidbody>();
-        if (playerRoot == null) playerRoot = transform;
-        if (headTransform == null && Camera.main != null) headTransform = Camera.main.transform;
-        AcquireControllers();
-        StopEffects();
-    }
-
-    private void OnEnable()
-    {
-        AcquireControllers();
-    }
-
-    private void Update()
-    {
-        if (!jetpackEnabled)
-        {
-            upHeld = false;
-            moveInput = Vector2.zero;
-            activeNow = false;
-            hoverEnabled = false;
-            StopEffects();
-            return;
-        }
-
-        if (!leftController.isValid || !rightController.isValid) AcquireControllers();
-
-        bool trigger = false;
-        bool primary = false;
-        Vector2 stick = Vector2.zero;
-        if (rightController.isValid)
-        {
-            rightController.TryGetFeatureValue(CommonUsages.triggerButton, out trigger);
-            rightController.TryGetFeatureValue(CommonUsages.primaryButton, out primary);
-        }
-        if (leftController.isValid)
-            leftController.TryGetFeatureValue(CommonUsages.primary2DAxis, out stick);
-
-        bool keyboardUp = SafeGetKey(KeyCode.Space);
-        Vector2 keyboardMove = new Vector2(
-            (SafeGetKey(KeyCode.D) ? 1f : 0f) - (SafeGetKey(KeyCode.A) ? 1f : 0f),
-            (SafeGetKey(KeyCode.W) ? 1f : 0f) - (SafeGetKey(KeyCode.S) ? 1f : 0f));
-
-        if ((primary && !lastPrimaryButton) || SafeGetKeyDown(KeyCode.H))
-            hoverEnabled = !hoverEnabled;
-        lastPrimaryButton = primary;
-
-        upHeld = trigger || keyboardUp;
-        moveInput = Vector2.ClampMagnitude(stick + keyboardMove, 1f);
-        activeNow = upHeld || moveInput.sqrMagnitude > 0.0025f || hoverEnabled;
-        UpdateEffects(activeNow);
-    }
-
-    private void FixedUpdate()
-    {
-        if (!jetpackEnabled || playerRigidbody == null) return;
-
-        if (upHeld)
-            playerRigidbody.AddForce(Vector3.up * upwardForce, ForceMode.Acceleration);
-
-        if (moveInput.sqrMagnitude > 0.0025f)
-        {
-            Transform basis = headTransform != null ? headTransform : (playerRoot != null ? playerRoot : transform);
-            Vector3 forward = Vector3.ProjectOnPlane(basis.forward, Vector3.up).normalized;
-            Vector3 right = Vector3.ProjectOnPlane(basis.right, Vector3.up).normalized;
-            Vector3 wish = forward * moveInput.y + right * moveInput.x;
-            if (wish.sqrMagnitude > 1f) wish.Normalize();
-            playerRigidbody.AddForce(wish * moveForce, ForceMode.Acceleration);
-        }
-
-        if (hoverEnabled)
-        {
-            playerRigidbody.AddForce(-Physics.gravity, ForceMode.Acceleration);
-            Vector3 v = GetVelocity();
-            playerRigidbody.AddForce(Vector3.up * (-v.y * hoverDamping), ForceMode.Acceleration);
-        }
-
-        if (activeNow && maxSpeed > 0.1f)
-        {
-            Vector3 v = GetVelocity();
-            if (v.magnitude > maxSpeed)
-                SetVelocity(v.normalized * maxSpeed);
-        }
-    }
-
-    public void EnableJetpack()
-    {
-        jetpackEnabled = true;
-    }
-
-    public void DisableJetpack()
-    {
-        jetpackEnabled = false;
-        hoverEnabled = false;
-        upHeld = false;
-        moveInput = Vector2.zero;
-        activeNow = false;
-        StopEffects();
-    }
-
-    public void ToggleJetpack()
-    {
-        if (jetpackEnabled) DisableJetpack();
-        else EnableJetpack();
-    }
-
-    private void AcquireControllers()
-    {
-        leftController = InputDevices.GetDeviceAtXRNode(XRNode.LeftHand);
-        rightController = InputDevices.GetDeviceAtXRNode(XRNode.RightHand);
-    }
-
-    private void UpdateEffects(bool active)
-    {
-        if (jetpackAudio != null)
-        {
-            if (active && !jetpackAudio.isPlaying && jetpackAudio.clip != null) jetpackAudio.Play();
-            else if (!active && jetpackAudio.isPlaying) jetpackAudio.Stop();
-        }
-
-        SetParticle(leftThruster, active);
-        SetParticle(rightThruster, active);
-    }
-
-    private static void SetParticle(ParticleSystem ps, bool active)
-    {
-        if (ps == null) return;
-        if (active)
-        {
-            if (!ps.isPlaying) ps.Play();
-        }
-        else if (ps.isPlaying)
-        {
-            ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
-        }
-    }
-
-    private void StopEffects()
-    {
-        if (jetpackAudio != null && jetpackAudio.isPlaying) jetpackAudio.Stop();
-        SetParticle(leftThruster, false);
-        SetParticle(rightThruster, false);
-    }
-
-    private void OnDisable()
-    {
-        StopEffects();
-    }
-
-    private static bool SafeGetKey(KeyCode key)
-    {
-        try { return Input.GetKey(key); }
-        catch (InvalidOperationException) { return false; }
-    }
-
-    private static bool SafeGetKeyDown(KeyCode key)
-    {
-        try { return Input.GetKeyDown(key); }
-        catch (InvalidOperationException) { return false; }
-    }
-
-    private Vector3 GetVelocity()
-    {
-#if UNITY_6000_0_OR_NEWER
-        return playerRigidbody.linearVelocity;
-#else
-        return playerRigidbody.velocity;
-#endif
-    }
-
-    private void SetVelocity(Vector3 value)
-    {
-#if UNITY_6000_0_OR_NEWER
-        playerRigidbody.linearVelocity = value;
-#else
-        playerRigidbody.velocity = value;
-#endif
-    }
-}
-";
     }
 }
