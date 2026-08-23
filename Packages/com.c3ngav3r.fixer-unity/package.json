@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.fixer-unity",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "displayName": "FIXER UNITY - Console & Builder",
-  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.5 fixes the VR Jetpack repair compiler failure by moving the controller source into a separate text template and rebuilding the editor repair path safely.",
+  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.6 removes the immutable package TextAsset jetpack template warning and adds a deterministic fixed VR jetpack repair path.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
