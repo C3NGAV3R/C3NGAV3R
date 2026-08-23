@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.fixer-unity",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "displayName": "FIXER UNITY - Console & Builder",
-  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.4 adds a deterministic VR jetpack builder/repair that writes JetpackController.cs, waits for Unity compilation, reuses the existing player Rigidbody, auto-finds the player/head, wires XR controls, audio and lightweight thrusters, and cleans failed empty JetpackController objects without creating a second player or Rigidbody.",
+  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.5 fixes the VR Jetpack repair compiler failure by moving the controller source into a separate text template and rebuilding the editor repair path safely.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
