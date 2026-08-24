@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.primatepanic-ai",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "displayName": "Primate Panic AI",
-  "description": "Local Unity AI powered by Ollama. v1.1 adds SOL LOCAL: a no-credits multi-pass architect-planner-reviewer-executor-verifier agent with one bounded auto-repair pass, low-memory Qwen3 4B defaults, project context inspection, selected script source reading, recent Console error context, World Space UI support through the shared bounded executor, and zero-action recovery.",
+  "description": "Local Unity AI powered by Ollama. v1.2 adds the FIXED scene-aware repair engine: recursive hierarchy inspection, real Button discovery, deterministic existing-object resolution, persistent UnityEvent wiring, duplicate-UI avoidance, and explicit verification instead of false success reports.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
