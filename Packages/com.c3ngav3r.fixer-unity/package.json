@@ -1,8 +1,8 @@
 {
   "name": "com.c3ngav3r.fixer-unity",
-  "version": "1.0.6",
+  "version": "2.0.0",
   "displayName": "FIXER UNITY - Console & Builder",
-  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Game Builder. v1.0.6 removes the immutable package TextAsset jetpack template warning and adds a deterministic fixed VR jetpack repair path.",
+  "description": "Zero-credit local Unity assistant with Console Fixer, AI Builder and Smart Agent. v2.0.0 adds recursive scene inspection, verified UI discovery, bounded Play Mode smoke testing, runtime error capture, and inspect-plan-test verification workflow.",
   "unity": "2022.3",
   "author": {
     "name": "C3NGAV3R"
